@@ -176,6 +176,48 @@ router.get('/detailed', async (req, res) => {
   }
 });
 
+// GET /health/rpc - Тестирование RPC подключения
+router.get('/rpc', async (req, res) => {
+  try {
+    console.log('[Health] Начинаем тест RPC подключения...');
+    
+    const solana = getSolanaService();
+    
+    // Сбрасываем инициализацию для повторного теста
+    solana.initialized = false;
+    solana.umi = null;
+    
+    const startTime = Date.now();
+    await solana.initialize();
+    const duration = Date.now() - startTime;
+    
+    const balance = await solana.getWalletBalance();
+    
+    res.json({
+      success: true,
+      data: {
+        rpcConnected: true,
+        initializationTime: `${duration}ms`,
+        walletBalance: balance,
+        walletAddress: solana.umi?.identity?.publicKey?.toString(),
+        rpcUrl: process.env.RPC_URL,
+        backupRpcs: process.env.BACKUP_RPC_URLS?.split(',') || []
+      },
+      message: 'RPC подключение успешно'
+    });
+    
+  } catch (error) {
+    console.error('[Health] RPC test failed:', error);
+    res.status(500).json({
+      success: false,
+      error: 'RPC connection failed',
+      details: error.message,
+      rpcUrl: process.env.RPC_URL,
+      backupRpcs: process.env.BACKUP_RPC_URLS?.split(',') || []
+    });
+  }
+});
+
 // GET /health/services - Быстрая проверка только сервисов
 router.get('/services', async (req, res) => {
   try {

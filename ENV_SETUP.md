@@ -12,8 +12,11 @@ API_KEY=test_api_key_2024
 
 # Solana Blockchain (ВАЖНО: добавьте свой PRIVATE_KEY)
 PRIVATE_KEY=your_base58_private_key_here
-RPC_URL=https://api.mainnet-beta.solana.com
-BACKUP_RPC_URLS=https://solana-api.projectserum.com,https://rpc.ankr.com/solana
+# Для Alchemy (рекомендуется):
+RPC_URL=https://solana-mainnet.g.alchemy.com/v2/YOUR-ALCHEMY-API-KEY
+# Или стандартный публичный RPC:
+# RPC_URL=https://api.mainnet-beta.solana.com
+BACKUP_RPC_URLS=https://api.mainnet-beta.solana.com,https://solana-api.projectserum.com
 
 # Default Settings (fallback значения)
 DEFAULT_RECIPIENT=A27VztuDLCA3FwnELbCnoGQW83Rk5xfrL7A79A8xbDTP

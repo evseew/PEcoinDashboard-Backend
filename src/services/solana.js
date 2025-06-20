@@ -26,7 +26,10 @@ class SolanaService {
 
     console.log(`[Solana Service] Инициализация Umi для: ${url}`);
     const umi = createUmi(url, {
-      httpOptions: { fetchMiddleware: (req, next) => next(req) }
+      httpOptions: { 
+        fetchMiddleware: (req, next) => next(req),
+        timeout: 15000 // 15 секунд таймаут
+      }
     });
 
     // Загрузка кошелька плательщика (из reference)
@@ -63,28 +66,44 @@ class SolanaService {
           "https://rpc.ankr.com/solana"
         ];
     
-    const rpcUrls = [MAIN_RPC_URL, ...BACKUP_RPC_URLS].filter(url => url);
+    const rpcUrls = [MAIN_RPC_URL, ...BACKUP_RPC_URLS].filter(url => url && url.trim());
     
     console.log("\n[Solana Service] Попытка подключения к Solana RPC...");
+    console.log(`[Solana Service] Список RPC для тестирования: ${rpcUrls.join(', ')}`);
+    
+    let lastError = null;
     
     for (const url of rpcUrls) {
       console.log(`[Solana Service] Пробуем: ${url}`);
       try {
         const tempUmi = await this.createUmiInstanceWithConfirm(url);
-        await tempUmi.rpc.getLatestBlockhash(); // Проверка работоспособности
+        
+        // Более детальная проверка подключения
+        console.log(`[Solana Service] Создан UMI instance для ${url}, проверяем связь...`);
+        const blockHash = await Promise.race([
+          tempUmi.rpc.getLatestBlockhash(),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Timeout 10s')), 10000)
+          )
+        ]);
+        
         console.log(`[Solana Service] ✅ Успешно подключились к: ${url}`);
+        console.log(`[Solana Service] Последний blockhash: ${blockHash.value.blockhash.substring(0, 8)}...`);
         this.umi = tempUmi;
-        break;
+        return this.umi;
+        
       } catch (e) {
-        console.warn(`[Solana Service] ❌ Ошибка подключения к ${url}: ${e.message}`);
+        lastError = e;
+        console.warn(`[Solana Service] ❌ Ошибка подключения к ${url}:`);
+        console.warn(`[Solana Service]    Тип ошибки: ${e.constructor.name}`);
+        console.warn(`[Solana Service]    Сообщение: ${e.message}`);
+        console.warn(`[Solana Service]    Stack: ${e.stack?.split('\n')[0]}`);
       }
     }
     
-    if (!this.umi) {
-      throw new Error("Не удалось подключиться ни к одному RPC-эндпоинту");
-    }
-    
-    return this.umi;
+    console.error(`[Solana Service] ❌ Не удалось подключиться ни к одному RPC из ${rpcUrls.length} вариантов`);
+    console.error(`[Solana Service] Последняя ошибка:`, lastError);
+    throw new Error(`Не удалось подключиться ни к одному RPC-эндпоинту. Последняя ошибка: ${lastError?.message}`);
   }
   
   // Инициализация сервиса с проверками
@@ -396,4 +415,5 @@ class SolanaService {
   }
 }
 
+module.exports = SolanaService; 
 module.exports = SolanaService; 
