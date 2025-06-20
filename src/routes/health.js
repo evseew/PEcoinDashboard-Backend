@@ -229,4 +229,82 @@ router.get('/services', async (req, res) => {
   }
 });
 
+// GET /health/wallet - Проверка баланса кошелька для минтинга
+router.get('/wallet', async (req, res) => {
+  try {
+    if (!process.env.PRIVATE_KEY) {
+      return res.json({
+        success: false,
+        error: 'Private key not configured',
+        message: 'Кошелек для минтинга не настроен'
+      });
+    }
+
+    const solana = getSolanaService();
+    
+    // Проверяем баланс
+    const balanceInfo = await solana.checkWalletBalance();
+    
+    // Оценка стоимости для разных операций
+    const costs = {
+      singleMint: await solana.estimateMintCost(1),
+      batchMint10: await solana.estimateMintCost(10),
+      batchMint50: await solana.estimateMintCost(50)
+    };
+    
+    // Проверка возможности операций
+    const affordability = {
+      singleMint: await solana.canAffordOperation(1),
+      batchMint10: await solana.canAffordOperation(10),
+      batchMint50: await solana.canAffordOperation(50)
+    };
+
+    // Определяем статус кошелька
+    let walletStatus = 'healthy';
+    let warnings = [];
+    
+    if (balanceInfo.balance < 0.001) {
+      walletStatus = 'critical';
+      warnings.push('Критически низкий баланс - минтинг невозможен');
+    } else if (balanceInfo.balance < 1) {
+      walletStatus = 'warning';
+      warnings.push('Низкий баланс - рекомендуется пополнение');
+    } else if (balanceInfo.balance < 5) {
+      walletStatus = 'low';
+      warnings.push('Баланс ниже рекомендуемого уровня');
+    }
+
+    res.json({
+      success: true,
+      status: walletStatus,
+      wallet: {
+        address: balanceInfo.address,
+        balance: balanceInfo.balance,
+        balanceFormatted: `${balanceInfo.balance.toFixed(4)} SOL`,
+        lastChecked: balanceInfo.timestamp
+      },
+      costs,
+      affordability,
+      warnings,
+      recommendations: {
+        minimumBalance: '1 SOL',
+        recommendedBalance: '10-50 SOL',
+        rechargeTrigger: '5 SOL'
+      },
+      links: {
+        explorer: `https://explorer.solana.com/address/${balanceInfo.address}`,
+        faucet: process.env.RPC_URL?.includes('devnet') ? 'https://faucet.solana.com' : null
+      }
+    });
+
+  } catch (error) {
+    console.error('[Health] Ошибка проверки кошелька:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Wallet check failed',
+      message: error.message
+    });
+  }
+});
+
 module.exports = router; 

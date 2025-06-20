@@ -283,6 +283,117 @@ class SolanaService {
       return false;
     }
   }
+
+  // Проверка баланса кошелька
+  async checkWalletBalance() {
+    try {
+      const balance = await this.umi.rpc.getBalance(this.umi.identity.publicKey);
+      const solBalance = balance.basisPoints / 1e9; // Конвертируем в SOL
+      
+      const balanceInfo = {
+        balance: solBalance,
+        lamports: balance.basisPoints,
+        address: this.umi.identity.publicKey.toString(),
+        timestamp: new Date().toISOString()
+      };
+      
+      // Предупреждение при низком балансе
+      if (solBalance < 1) {
+        console.warn(`⚠️ Низкий баланс кошелька: ${solBalance.toFixed(4)} SOL`);
+        console.warn(`📍 Адрес кошелька: ${this.umi.identity.publicKey.toString()}`);
+      } else if (solBalance < 5) {
+        console.log(`💰 Баланс кошелька: ${solBalance.toFixed(4)} SOL (рекомендуется пополнить)`);
+      } else {
+        console.log(`✅ Баланс кошелька: ${solBalance.toFixed(4)} SOL`);
+      }
+      
+      return balanceInfo;
+      
+    } catch (error) {
+      console.error('[Solana Service] Ошибка проверки баланса:', error.message);
+      throw new Error(`Failed to check wallet balance: ${error.message}`);
+    }
+  }
+
+  // Оценка стоимости операции минтинга
+  async estimateMintCost(itemCount = 1) {
+    try {
+      // Примерная стоимость compressed NFT минтинга
+      const baseFee = 0.00025; // SOL за транзакцию
+      const perItemFee = 0.0001; // SOL за каждый NFT
+      
+      const estimatedCost = baseFee + (perItemFee * itemCount);
+      
+      return {
+        estimatedCost,
+        itemCount,
+        baseFee,
+        perItemFee,
+        currency: 'SOL'
+      };
+      
+    } catch (error) {
+      console.error('[Solana Service] Ошибка оценки стоимости:', error.message);
+      return {
+        estimatedCost: 0.001 * itemCount, // Fallback оценка
+        itemCount,
+        currency: 'SOL',
+        error: error.message
+      };
+    }
+  }
+
+  // Проверка достаточности баланса для операции
+  async canAffordOperation(itemCount = 1) {
+    try {
+      const balanceInfo = await this.checkWalletBalance();
+      const costEstimate = await this.estimateMintCost(itemCount);
+      
+      const canAfford = balanceInfo.balance >= costEstimate.estimatedCost;
+      const remainingBalance = balanceInfo.balance - costEstimate.estimatedCost;
+      
+      return {
+        canAfford,
+        currentBalance: balanceInfo.balance,
+        estimatedCost: costEstimate.estimatedCost,
+        remainingBalance: Math.max(0, remainingBalance),
+        itemCount,
+        warning: remainingBalance < 1 ? 'Баланс будет низким после операции' : null
+      };
+      
+    } catch (error) {
+      console.error('[Solana Service] Ошибка проверки возможности операции:', error.message);
+      return {
+        canAfford: false,
+        error: error.message
+      };
+    }
+  }
+
+  // Логирование транзакции с расходами
+  async logTransaction(signature, itemCount, actualCost = null) {
+    try {
+      const costEstimate = await this.estimateMintCost(itemCount);
+      const cost = actualCost || costEstimate.estimatedCost;
+      
+      console.log(`💳 Транзакция выполнена:`);
+      console.log(`   Signature: ${signature}`);
+      console.log(`   Items: ${itemCount}`);
+      console.log(`   Cost: ~${cost.toFixed(6)} SOL`);
+      console.log(`   Explorer: https://explorer.solana.com/tx/${signature}`);
+      
+      return {
+        signature,
+        itemCount,
+        cost,
+        timestamp: new Date().toISOString(),
+        explorerUrl: `https://explorer.solana.com/tx/${signature}`
+      };
+      
+    } catch (error) {
+      console.error('[Solana Service] Ошибка логирования транзакции:', error.message);
+    }
+  }
 }
 
 module.exports = SolanaService; 
