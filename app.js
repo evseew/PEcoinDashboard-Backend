@@ -5,6 +5,8 @@ require('dotenv').config();
 // Routes
 const healthRoutes = require('./src/routes/health');
 const apiRoutes = require('./src/routes/api');
+const collectionsRoutes = require('./src/routes/collections');
+const uploadRoutes = require('./src/routes/upload');
 
 // Middleware
 const authMiddleware = require('./src/middleware/auth');
@@ -47,6 +49,8 @@ app.get('/', (req, res) => {
 
 // API routes (с авторизацией)
 app.use('/api', authMiddleware, apiRoutes);
+app.use('/api/collections', authMiddleware, collectionsRoutes);
+app.use('/api/upload', authMiddleware, uploadRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
