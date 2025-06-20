@@ -79,10 +79,43 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('UNCAUGHT EXCEPTION! 💥 Shutting down...');
+  console.error('Error:', error.name, error.message);
+  console.error('Stack:', error.stack);
+  process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('UNHANDLED REJECTION! 💥 Shutting down...');
+  console.error('Reason:', reason);
+  console.error('Promise:', promise);
+  process.exit(1);
+});
+
+// Start server with error handling
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 NFT Backend server running on port ${PORT}`);
   console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`⏰ Started at: ${new Date().toISOString()}`);
+  console.log(`🌐 Server address: http://0.0.0.0:${PORT}`);
+});
+
+// Handle server errors
+server.on('error', (error) => {
+  console.error('SERVER ERROR! 💥');
+  console.error('Error code:', error.code);
+  console.error('Error message:', error.message);
+  
+  if (error.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use`);
+  } else if (error.code === 'EACCES') {
+    console.error(`Permission denied to bind to port ${PORT}`);
+  }
+  
+  process.exit(1);
 });
 
 module.exports = app; 
