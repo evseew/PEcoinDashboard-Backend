@@ -1,4 +1,8 @@
 const express = require('express');
+const collectionsRouter = require('./collections');
+const uploadRouter = require('./upload');
+const mintRouter = require('./mint');
+
 const router = express.Router();
 
 // Test API endpoint
@@ -30,5 +34,10 @@ router.get('/', (req, res) => {
     }
   });
 });
+
+// Подключаем роутеры
+router.use('/collections', collectionsRouter);
+router.use('/upload', uploadRouter);
+router.use('/mint', mintRouter);
 
 module.exports = router; 
