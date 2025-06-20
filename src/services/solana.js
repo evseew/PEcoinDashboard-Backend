@@ -178,7 +178,7 @@ class SolanaService {
       try {
         const txStartTime = Date.now();
         
-        // Создаем инструкцию минтинга (из reference)
+        // Создаем инструкцию минтинга compressed NFT (из reference)
         const mintInstruction = bubblegum.mintToCollectionV1(this.umi, {
           leafOwner: publicKey(recipient),
           merkleTree: publicKey(treeAddress),
