@@ -19,7 +19,13 @@
     "@metaplex-foundation/umi-bundle-defaults": "^0.9.1",
     "@metaplex-foundation/mpl-bubblegum": "^0.7.0",
     "@solana/web3.js": "^1.87.6",
-    "bs58": "^5.0.0"
+    "bs58": "^5.0.0",
+    
+    "// IPFS": "",
+    "@pinata/sdk": "^2.1.0",
+    
+    "// Database": "",
+    "@supabase/supabase-js": "^2.38.5"
   },
   "engines": {
     "node": ">=18.0.0"
