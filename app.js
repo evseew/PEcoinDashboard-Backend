@@ -3,7 +3,15 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || process.env.VCAP_APP_PORT || 8080;
+
+// Log all environment variables for debugging
+console.log('=== ENVIRONMENT DEBUG ===');
+console.log('PORT:', process.env.PORT);
+console.log('VCAP_APP_PORT:', process.env.VCAP_APP_PORT);
+console.log('NODE_ENV:', process.env.NODE_ENV);
+console.log('All env keys:', Object.keys(process.env).filter(k => k.includes('PORT')));
+console.log('========================');
 
 // Trust proxy (для TimeWeb)
 app.set('trust proxy', 1);
