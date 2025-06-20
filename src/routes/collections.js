@@ -1,8 +1,17 @@
 const express = require('express');
-const CollectionsService = require('../services/collections');
 
 const router = express.Router();
-const collectionsService = new CollectionsService();
+
+// Ленивая инициализация CollectionsService
+let collectionsService = null;
+
+function getCollectionsService() {
+  if (!collectionsService) {
+    const CollectionsService = require('../services/collections');
+    collectionsService = new CollectionsService();
+  }
+  return collectionsService;
+}
 
 // GET /api/collections - Получить список коллекций
 router.get('/', (req, res) => {
@@ -15,6 +24,7 @@ router.get('/', (req, res) => {
     if (limit) filters.limit = parseInt(limit);
     if (offset) filters.offset = parseInt(offset);
     
+    const collectionsService = getCollectionsService();
     const result = collectionsService.getCollections(filters);
     
     res.json({
@@ -34,6 +44,7 @@ router.get('/', (req, res) => {
 // GET /api/collections/active - Получить только активные коллекции для минтинга
 router.get('/active', (req, res) => {
   try {
+    const collectionsService = getCollectionsService();
     const activeCollections = collectionsService.getActiveCollections();
     
     res.json({
@@ -57,6 +68,7 @@ router.get('/active', (req, res) => {
 router.get('/:id', (req, res) => {
   try {
     const { id } = req.params;
+    const collectionsService = getCollectionsService();
     const collection = collectionsService.getCollection(id);
     
     if (!collection) {
@@ -84,6 +96,7 @@ router.get('/:id', (req, res) => {
 router.get('/:id/mint-check', (req, res) => {
   try {
     const { id } = req.params;
+    const collectionsService = getCollectionsService();
     const mintCheck = collectionsService.canMintInCollection(id);
     
     res.json({
@@ -113,6 +126,7 @@ router.post('/', (req, res) => {
       });
     }
     
+    const collectionsService = getCollectionsService();
     const collection = collectionsService.createCollection(collectionData);
     
     res.status(201).json({
@@ -136,6 +150,7 @@ router.put('/:id', (req, res) => {
     const { id } = req.params;
     const updates = req.body;
     
+    const collectionsService = getCollectionsService();
     const updatedCollection = collectionsService.updateCollection(id, updates);
     
     if (!updatedCollection) {

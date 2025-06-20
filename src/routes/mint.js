@@ -1,16 +1,30 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
-const SolanaService = require('../services/solana');
-const CollectionsService = require('../services/collections');
 
 const router = express.Router();
 
-// Инициализируем сервисы
-const solanaService = new SolanaService();
-const collectionsService = new CollectionsService();
-
 // Хранилище операций минтинга (в продакшене используй Redis/DB)
 const mintOperations = new Map();
+
+// Ленивая инициализация сервисов
+let solanaService = null;
+let collectionsService = null;
+
+function getSolanaService() {
+  if (!solanaService) {
+    const SolanaService = require('../services/solana');
+    solanaService = new SolanaService();
+  }
+  return solanaService;
+}
+
+function getCollectionsService() {
+  if (!collectionsService) {
+    const CollectionsService = require('../services/collections');
+    collectionsService = new CollectionsService();
+  }
+  return collectionsService;
+}
 
 // Конфигурация по умолчанию (из reference/config.js)
 const DEFAULT_CONFIG = {
@@ -46,6 +60,10 @@ router.post('/single', async (req, res) => {
         error: 'Отсутствуют обязательные поля: metadata.name и metadata.uri'
       });
     }
+    
+    // Инициализируем сервисы только при необходимости
+    const collectionsService = getCollectionsService();
+    const solanaService = getSolanaService();
     
     // Получаем данные коллекции
     const collection = collectionsService.getCollection(collectionId);
@@ -195,6 +213,10 @@ router.post('/batch', async (req, res) => {
         error: 'Максимальное количество NFT в пакете: 50'
       });
     }
+    
+    // Инициализируем сервисы только при необходимости
+    const collectionsService = getCollectionsService();
+    const solanaService = getSolanaService();
     
     // Получаем данные коллекции
     const collection = collectionsService.getCollection(collectionId);

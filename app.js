@@ -15,52 +15,30 @@ app.use((req, res, next) => {
   next();
 });
 
-// Проверка критических компонентов при запуске
-function validateEnvironment() {
+// Простая проверка окружения (без остановки приложения)
+function checkEnvironment() {
   const warnings = [];
-  const errors = [];
   
-  // Критические проверки
   if (!process.env.API_KEY) {
-    warnings.push('API_KEY не установлен, аутентификация отключена');
+    warnings.push('API_KEY не установлен');
   }
   
-  // Solana конфигурация (не критично для запуска, но важно для функционала)
   if (!process.env.PRIVATE_KEY) {
-    warnings.push('PRIVATE_KEY не установлен, минтинг будет недоступен');
+    warnings.push('PRIVATE_KEY не установлен, минтинг недоступен');
   }
   
-  if (!process.env.RPC_URL) {
-    warnings.push('RPC_URL не установлен, будет использован дефолтный');
-  }
-  
-  // Вывод предупреждений
   if (warnings.length > 0) {
-    console.log('\n⚠️  Предупреждения конфигурации:');
+    console.log('\n⚠️  Предупреждения:');
     warnings.forEach(warning => console.log(`   - ${warning}`));
-  }
-  
-  // Критические ошибки (если будут)
-  if (errors.length > 0) {
-    console.error('\n❌ Критические ошибки:');
-    errors.forEach(error => console.error(`   - ${error}`));
-    throw new Error('Невозможно запустить приложение из-за критических ошибок');
-  }
-  
-  if (warnings.length === 0) {
-    console.log('\n✅ Конфигурация окружения корректна');
+  } else {
+    console.log('\n✅ Базовая конфигурация в порядке');
   }
 }
 
-// Выполняем проверку
-try {
-  validateEnvironment();
-} catch (error) {
-  console.error('Ошибка валидации конфигурации:', error.message);
-  process.exit(1);
-}
+// Выполняем проверку без остановки
+checkEnvironment();
 
-// Import routes
+// Import routes (без блокирующих инициализаций)
 const healthRouter = require('./src/routes/health');
 const apiRouter = require('./src/routes/api');
 const authMiddleware = require('./src/middleware/auth');
