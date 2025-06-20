@@ -3,6 +3,17 @@ const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
 const router = express.Router();
 
+// Ленивая инициализация IPFS сервиса
+let ipfsService = null;
+
+function getIPFSService() {
+  if (!ipfsService) {
+    const IPFSService = require('../services/ipfs');
+    ipfsService = new IPFSService();
+  }
+  return ipfsService;
+}
+
 // Middleware для файлов
 const upload = multer({ 
   dest: '/tmp/uploads/',
@@ -30,6 +41,8 @@ const upload = multer({
 
 // POST /api/upload/ipfs - Загрузка на IPFS
 router.post('/ipfs', upload.array('files', 50), async (req, res) => {
+  let tempFiles = [];
+  
   try {
     const files = req.files;
     const metadata = req.body.metadata ? JSON.parse(req.body.metadata) : null;
@@ -42,37 +55,60 @@ router.post('/ipfs', upload.array('files', 50), async (req, res) => {
       });
     }
     
-    // Временная симуляция загрузки на IPFS (потом заменим на Pinata)
-    const uploads = files.map(file => {
-      const mockHash = `Qm${Math.random().toString(36).substring(2, 15)}${Math.random().toString(36).substring(2, 15)}`;
-      
-      return {
-        filename: file.originalname,
-        ipfsHash: mockHash,
-        ipfsUri: `ipfs://${mockHash}`,
-        gatewayUrl: `https://gateway.pinata.cloud/ipfs/${mockHash}`,
-        size: file.size,
-        mimetype: file.mimetype,
-        uploadId: uuidv4()
-      };
+    // Запоминаем временные файлы для очистки
+    tempFiles = files.map(f => f.path);
+    
+    console.log(`[Upload API] Загрузка ${files.length} файлов на IPFS`);
+    
+    const ipfsService = getIPFSService();
+    const batchId = uuidv4();
+    
+    // Загружаем файлы на IPFS
+    const uploadResult = await ipfsService.uploadMultipleFiles(files, {
+      batchId,
+      metadata
     });
     
-    // Симуляция задержки загрузки
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Очищаем временные файлы
+    for (const filePath of tempFiles) {
+      await ipfsService.cleanupTempFile(filePath);
+    }
     
-    res.json({
+    // Формируем ответ
+    const response = {
       success: true,
       data: {
-        uploads,
-        totalFiles: uploads.length,
-        totalSize: uploads.reduce((sum, upload) => sum + upload.size, 0),
+        uploads: uploadResult.successful,
+        totalFiles: uploadResult.totalFiles,
+        successCount: uploadResult.successCount,
+        errorCount: uploadResult.errorCount,
+        totalSize: uploadResult.successful.reduce((sum, upload) => sum + upload.size, 0),
+        batchId,
         metadata: metadata || null
       },
-      message: `Successfully uploaded ${uploads.length} file(s) to IPFS`
-    });
+      message: `Successfully uploaded ${uploadResult.successCount}/${uploadResult.totalFiles} file(s) to IPFS`
+    };
+    
+    // Добавляем информацию об ошибках, если есть
+    if (uploadResult.errorCount > 0) {
+      response.data.errors = uploadResult.failed;
+      response.warnings = `${uploadResult.errorCount} files failed to upload`;
+    }
+    
+    res.json(response);
     
   } catch (error) {
-    console.error('IPFS upload error:', error);
+    console.error('[Upload API] IPFS upload error:', error);
+    
+    // Очищаем временные файлы в случае ошибки
+    for (const filePath of tempFiles) {
+      try {
+        const ipfsService = getIPFSService();
+        await ipfsService.cleanupTempFile(filePath);
+      } catch (cleanupError) {
+        console.error('Cleanup error:', cleanupError);
+      }
+    }
     
     // Специальная обработка multer ошибок
     if (error.code === 'LIMIT_FILE_SIZE') {
@@ -121,27 +157,37 @@ router.post('/metadata', async (req, res) => {
       });
     }
     
-    // Временная симуляция загрузки JSON на IPFS
-    const mockHash = `Qm${Math.random().toString(36).substring(2, 15)}${Math.random().toString(36).substring(2, 15)}`;
+    console.log('[Upload API] Загрузка JSON метаданных на IPFS');
+    
+    const ipfsService = getIPFSService();
     const metadataFilename = filename || `metadata-${uuidv4()}.json`;
     
-    // Симуляция задержки
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // Загружаем JSON на IPFS
+    const result = await ipfsService.uploadJSON(metadata, {
+      name: metadataFilename,
+      metadata: {
+        type: 'nft-metadata',
+        uploadedAt: new Date().toISOString()
+      }
+    });
     
     res.json({
       success: true,
       data: {
         filename: metadataFilename,
-        ipfsHash: mockHash,
-        ipfsUri: `ipfs://${mockHash}`,
-        gatewayUrl: `https://gateway.pinata.cloud/ipfs/${mockHash}`,
-        metadata
+        ipfsHash: result.ipfsHash,
+        ipfsUri: result.ipfsUri,
+        gatewayUrl: result.gatewayUrl,
+        size: result.size,
+        timestamp: result.timestamp,
+        metadata,
+        mock: result.mock || false
       },
       message: 'Metadata uploaded to IPFS successfully'
     });
     
   } catch (error) {
-    console.error('Metadata upload error:', error);
+    console.error('[Upload API] Metadata upload error:', error);
     res.status(500).json({
       success: false,
       error: 'Metadata upload failed',
@@ -150,21 +196,38 @@ router.post('/metadata', async (req, res) => {
   }
 });
 
-// GET /api/upload/status - Статус загрузок (для будущих фич)
+// GET /api/upload/status - Статус IPFS сервиса
 router.get('/status', async (req, res) => {
-  res.json({
-    success: true,
-    data: {
-      service: 'IPFS Upload Service',
-      provider: 'Pinata (simulated)',
-      status: 'operational',
-      limits: {
-        maxFileSize: '10MB',
-        maxFiles: 50,
-        allowedTypes: ['jpeg', 'png', 'gif', 'webp', 'svg']
+  try {
+    const ipfsService = getIPFSService();
+    const serviceStatus = ipfsService.getServiceStatus();
+    
+    res.json({
+      success: true,
+      data: {
+        service: 'IPFS Upload Service',
+        ...serviceStatus,
+        limits: {
+          maxFileSize: '10MB',
+          maxFiles: 50,
+          allowedTypes: ['jpeg', 'png', 'gif', 'webp', 'svg']
+        },
+        endpoints: {
+          upload: '/api/upload/ipfs',
+          metadata: '/api/upload/metadata',
+          status: '/api/upload/status'
+        }
       }
-    }
-  });
+    });
+    
+  } catch (error) {
+    console.error('[Upload API] Status error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get service status',
+      message: error.message
+    });
+  }
 });
 
 module.exports = router; 

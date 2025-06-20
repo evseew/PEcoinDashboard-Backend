@@ -1,57 +1,232 @@
 const express = require('express');
 const router = express.Router();
 
-// Базовая проверка здоровья
+// Ленивая инициализация сервисов для проверки
+let ipfsService = null;
+let databaseService = null;
+let collectionsService = null;
+let solanaService = null;
+
+function getIPFSService() {
+  if (!ipfsService) {
+    const IPFSService = require('../services/ipfs');
+    ipfsService = new IPFSService();
+  }
+  return ipfsService;
+}
+
+function getDatabaseService() {
+  if (!databaseService) {
+    const DatabaseService = require('../services/database');
+    databaseService = new DatabaseService();
+  }
+  return databaseService;
+}
+
+function getCollectionsService() {
+  if (!collectionsService) {
+    const CollectionsService = require('../services/collections');
+    collectionsService = new CollectionsService();
+  }
+  return collectionsService;
+}
+
+function getSolanaService() {
+  if (!solanaService) {
+    const SolanaService = require('../services/solana');
+    solanaService = new SolanaService();
+  }
+  return solanaService;
+}
+
+// GET /health - Базовая проверка здоровья
 router.get('/', (req, res) => {
   res.json({
     success: true,
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    version: process.env.npm_package_version || '1.0.0',
+    environment: process.env.NODE_ENV || 'development'
   });
 });
 
-// Детальная проверка здоровья  
-router.get('/detailed', (req, res) => {
-  const memoryUsage = process.memoryUsage();
-  
-  // Проверка переменных окружения для Solana
-  const solanaConfig = {
-    hasPrivateKey: !!process.env.PRIVATE_KEY,
-    hasRpcUrl: !!process.env.RPC_URL,
-    hasTreeAddress: !!process.env.TREE_ADDRESS,
-    hasCollectionAddress: !!process.env.COLLECTION_ADDRESS,
-    hasDefaultRecipient: !!process.env.DEFAULT_RECIPIENT,
-    rpcUrl: process.env.RPC_URL || 'not_set',
-    treeAddress: process.env.TREE_ADDRESS || 'not_set',
-    collectionAddress: process.env.COLLECTION_ADDRESS || 'not_set'
-  };
-  
-  // Проверка IPFS конфигурации
-  const ipfsConfig = {
-    hasPinataKey: !!process.env.PINATA_API_KEY,
-    hasGateway: !!process.env.DEDICATED_PINATA_GATEWAY,
-    gateway: process.env.DEDICATED_PINATA_GATEWAY || 'not_set'
-  };
-  
-  res.json({
-    success: true,
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    uptime: Math.floor(process.uptime()),
-    environment: process.env.NODE_ENV || 'development',
-    memory: {
-      rss: Math.round(memoryUsage.rss / 1024 / 1024) + ' MB',
-      heapTotal: Math.round(memoryUsage.heapTotal / 1024 / 1024) + ' MB',
-      heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024) + ' MB'
-    },
-    solana: solanaConfig,
-    ipfs: ipfsConfig,
-    ready: solanaConfig.hasPrivateKey && 
-           solanaConfig.hasTreeAddress && 
-           solanaConfig.hasCollectionAddress &&
-           ipfsConfig.hasPinataKey
-  });
+// GET /health/detailed - Детальная проверка всех компонентов
+router.get('/detailed', async (req, res) => {
+  try {
+    const startTime = Date.now();
+    
+    // Проверяем основные переменные окружения
+    const envCheck = {
+      NODE_ENV: !!process.env.NODE_ENV,
+      PORT: !!process.env.PORT,
+      API_KEY: !!process.env.API_KEY,
+      PRIVATE_KEY: !!process.env.PRIVATE_KEY,
+      RPC_URL: !!process.env.RPC_URL,
+      PINATA_API_KEY: !!process.env.PINATA_API_KEY,
+      PINATA_SECRET_API_KEY: !!process.env.PINATA_SECRET_API_KEY,
+      SUPABASE_URL: !!process.env.SUPABASE_URL,
+      SUPABASE_ANON_KEY: !!process.env.SUPABASE_ANON_KEY
+    };
+
+    // Проверяем сервисы
+    const services = {};
+
+    try {
+      const ipfs = getIPFSService();
+      services.ipfs = {
+        status: 'operational',
+        ...ipfs.getServiceStatus()
+      };
+    } catch (error) {
+      services.ipfs = {
+        status: 'error',
+        error: error.message
+      };
+    }
+
+    try {
+      const database = getDatabaseService();
+      services.database = {
+        status: 'operational',
+        ...database.getServiceStatus()
+      };
+    } catch (error) {
+      services.database = {
+        status: 'error',
+        error: error.message
+      };
+    }
+
+    try {
+      const collections = getCollectionsService();
+      const activeCollections = collections.getActiveCollections();
+      services.collections = {
+        status: 'operational',
+        activeCollections: activeCollections.length,
+        totalCollections: collections.getCollections().collections.length
+      };
+    } catch (error) {
+      services.collections = {
+        status: 'error',
+        error: error.message
+      };
+    }
+
+    try {
+      const solana = getSolanaService();
+      services.solana = {
+        status: 'operational',
+        network: process.env.RPC_URL ? 'configured' : 'default',
+        ready: !!process.env.PRIVATE_KEY
+      };
+    } catch (error) {
+      services.solana = {
+        status: 'error',
+        error: error.message
+      };
+    }
+
+    // Общий статус
+    const allServicesHealthy = Object.values(services).every(service => service.status === 'operational');
+    const criticalEnvMissing = !envCheck.API_KEY;
+
+    const healthStatus = criticalEnvMissing ? 'degraded' : (allServicesHealthy ? 'healthy' : 'partial');
+
+    const responseTime = Date.now() - startTime;
+
+    res.json({
+      success: true,
+      status: healthStatus,
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      responseTime: `${responseTime}ms`,
+      version: process.env.npm_package_version || '1.0.0',
+      environment: process.env.NODE_ENV || 'development',
+      checks: {
+        environment: {
+          status: criticalEnvMissing ? 'error' : 'ok',
+          variables: envCheck,
+          missing: Object.entries(envCheck)
+            .filter(([key, value]) => !value)
+            .map(([key]) => key)
+        },
+        services: services
+      },
+      endpoints: {
+        health: '/health',
+        detailed: '/health/detailed',
+        api: {
+          collections: '/api/collections',
+          mint: '/api/mint',
+          upload: '/api/upload'
+        }
+      },
+      warnings: criticalEnvMissing ? ['API_KEY не установлен - аутентификация отключена'] : []
+    });
+
+  } catch (error) {
+    console.error('[Health] Ошибка детальной проверки:', error);
+    res.status(500).json({
+      success: false,
+      status: 'error',
+      timestamp: new Date().toISOString(),
+      error: error.message
+    });
+  }
+});
+
+// GET /health/services - Быстрая проверка только сервисов
+router.get('/services', async (req, res) => {
+  try {
+    const services = {
+      ipfs: 'checking',
+      database: 'checking',
+      collections: 'checking',
+      solana: 'checking'
+    };
+
+    // Быстрая проверка без инициализации
+    try {
+      const ipfs = getIPFSService();
+      services.ipfs = ipfs.getServiceStatus().connected ? 'connected' : 'mock';
+    } catch (error) {
+      services.ipfs = 'error';
+    }
+
+    try {
+      const database = getDatabaseService();
+      services.database = database.getServiceStatus().connected ? 'connected' : 'mock';
+    } catch (error) {
+      services.database = 'error';
+    }
+
+    try {
+      const collections = getCollectionsService();
+      services.collections = 'ready';
+    } catch (error) {
+      services.collections = 'error';
+    }
+
+    try {
+      services.solana = process.env.PRIVATE_KEY ? 'ready' : 'mock';
+    } catch (error) {
+      services.solana = 'error';
+    }
+
+    res.json({
+      success: true,
+      services,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('[Health] Ошибка проверки сервисов:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 module.exports = router; 
