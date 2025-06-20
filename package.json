@@ -21,7 +21,8 @@
     "bs58": "^5.0.0",
     "@solana/web3.js": "^1.87.6",
     "@metaplex-foundation/umi-bundle-defaults": "^0.9.1",
-    "@metaplex-foundation/mpl-bubblegum": "^0.7.0"
+    "@metaplex-foundation/mpl-bubblegum": "^0.7.0",
+    "@metaplex-foundation/mpl-toolbox": "^0.9.1"
   },
   "engines": {
     "node": ">=18.0.0"

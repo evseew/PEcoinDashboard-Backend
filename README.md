@@ -1,53 +1,64 @@
 # PEcamp NFT Backend
 
-Express.js backend для минтинга сжатых NFT в экосистеме PEcamp на блокчейне Solana.
+Express.js backend для минтинга сжатых NFT в экосистеме PEcamp на блокчейне Solana с поддержкой **множественных коллекций**.
 
 ## 🚀 Возможности
 
-- **Минтинг одиночных NFT** - `/api/mint/single`
+- **Мульти-коллекции** - Поддержка множественных NFT коллекций
+- **Минтинг одиночных NFT** - `/api/mint/single` 
 - **Пакетный минтинг** - `/api/mint/batch` (до 50 NFT)  
 - **Отслеживание операций** - `/api/mint/status/:id`
 - **Управление коллекциями** - `/api/collections`
 - **Загрузка на IPFS** - `/api/upload`
 - **Мониторинг здоровья** - `/health`
 
+## 🎯 Архитектура мульти-коллекций
+
+**Flow для фронтенда:**
+1. Получить активные коллекции: `GET /api/collections/active`
+2. Пользователь выбирает коллекцию
+3. Минтинг с collectionId: `POST /api/mint/single`
+
+**Преимущества:**
+- Гибкость в управлении коллекциями
+- Централизованные настройки
+- Простая интеграция с фронтендом
+
 ## 🔧 Настройка окружения
 
-Создайте файл `.env` с следующими переменными:
-
 ```bash
-# API Configuration
+# API & Blockchain
 NODE_ENV=production
 PORT=8080
 API_KEY=your_api_key_here
-
-# Solana Blockchain (на основе reference/config.js)
 PRIVATE_KEY=your_base58_private_key_for_minting
 RPC_URL=your_main_rpc_endpoint
-BACKUP_RPC_URLS=https://solana-api.projectserum.com,https://rpc.ankr.com/solana
 
-# NFT Configuration (адреса из reference файлов)
-TREE_ADDRESS=your_merkle_tree_address
-COLLECTION_ADDRESS=your_collection_address  
-DEFAULT_RECIPIENT=your_default_recipient_wallet
-
-# IPFS Storage
+# IPFS Storage  
 PINATA_API_KEY=your_pinata_api_key
-PINATA_SECRET_API_KEY=your_pinata_secret_key
 DEDICATED_PINATA_GATEWAY=https://your-gateway.mypinata.cloud
 
-# Database
-SUPABASE_URL=your_supabase_url
-SUPABASE_ANON_KEY=your_supabase_anon_key
+# Default Settings
+DEFAULT_RECIPIENT=your_default_recipient_wallet
 ```
 
 ## 📡 API Endpoints
+
+### Коллекции
+
+**GET** `/api/collections` - Все коллекции с фильтрацией
+**GET** `/api/collections/active` - Активные коллекции для минтинга  
+**GET** `/api/collections/:id` - Конкретная коллекция
+**GET** `/api/collections/:id/mint-check` - Проверка возможности минтинга
+**POST** `/api/collections` - Создать коллекцию
+**PUT** `/api/collections/:id` - Обновить коллекцию
 
 ### Минтинг NFT
 
 **POST** `/api/mint/single` - Минт одного NFT
 ```json
 {
+  "collectionId": "pe-stickers",
   "recipient": "wallet_address",
   "metadata": {
     "name": "PE Sticker #1",
@@ -60,6 +71,7 @@ SUPABASE_ANON_KEY=your_supabase_anon_key
 **POST** `/api/mint/batch` - Пакетный минт
 ```json
 {
+  "collectionId": "pe-stickers",
   "items": [
     {
       "recipient": "wallet1", 
@@ -74,21 +86,24 @@ SUPABASE_ANON_KEY=your_supabase_anon_key
 ```
 
 **GET** `/api/mint/status/:operationId` - Статус операции
-
-**GET** `/api/mint/operations` - Список операций
+**GET** `/api/mint/operations?collectionId=pe-stickers` - Операции по коллекции
 
 ### Прочие API
 
-**GET** `/api/collections` - Список коллекций
 **POST** `/api/upload/ipfs` - Загрузка файлов
-**GET** `/health` - Проверка работоспособности
+**GET** `/health/detailed` - Проверка конфигурации Solana
 
 ## 🏗️ Архитектура
 
-Проект основан на проверенном коде из папки `reference/`:
-- `SolanaService` - адаптация `mint_nft_stable.js`
-- Конфигурация из `config.js`
-- Retry логика и обработка ошибок
+**Сервисы:**
+- `SolanaService` - адаптация `reference/mint_nft_stable.js`
+- `CollectionsService` - управление коллекциями
+- Проверенная retry логика из reference
+
+**Доступные коллекции:**
+- **pe-stickers** ✅ (активная, готова к минтингу)
+- **pe-badges** 🚧 (черновик)  
+- **pe-certificates** ⏳ (настройка)
 
 ## 🔑 Аутентификация
 
@@ -104,15 +119,10 @@ npm install
 npm start
 ```
 
-Для разработки с перезагрузкой:
-```bash
-npm run dev
-```
-
 ## 📦 Деплой на TimeWeb
 
-1. Убедитесь что переменные окружения настроены
+1. Настройте переменные окружения (см. ENV_SETUP.md)
 2. Проект использует PM2 (ecosystem.config.js)
-3. Порт: 8080 (автоматически из TimeWeb)
+3. Порт: 8080
 
-Статус деплоя: **Готов к Stage 4 тестированию**
+**Статус:** ✅ Готов к мульти-коллекционному тестированию

@@ -1,11 +1,13 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const SolanaService = require('../services/solana');
+const CollectionsService = require('../services/collections');
 
 const router = express.Router();
 
-// Инициализируем Solana service
+// Инициализируем сервисы
 const solanaService = new SolanaService();
+const collectionsService = new CollectionsService();
 
 // Хранилище операций минтинга (в продакшене используй Redis/DB)
 const mintOperations = new Map();
@@ -19,19 +21,25 @@ const DEFAULT_CONFIG = {
   maxRetries: 3
 };
 
-// POST /api/mint/single - Минт одного NFT
+// POST /api/mint/single - Минт одного NFT в выбранной коллекции
 router.post('/single', async (req, res) => {
   try {
     console.log('[Mint API] Запрос одиночного минтинга:', req.body);
     
     const { 
+      collectionId,  // ID коллекции вместо адресов
       recipient, 
-      metadata, 
-      treeAddress, 
-      collectionAddress 
+      metadata
     } = req.body;
     
     // Валидация обязательных полей
+    if (!collectionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Обязательное поле: collectionId'
+      });
+    }
+    
     if (!metadata || !metadata.name || !metadata.uri) {
       return res.status(400).json({
         success: false,
@@ -39,26 +47,28 @@ router.post('/single', async (req, res) => {
       });
     }
     
-    // Используем адреса из запроса или дефолтные
-    const finalTreeAddress = treeAddress || DEFAULT_CONFIG.treeAddress;
-    const finalCollectionAddress = collectionAddress || DEFAULT_CONFIG.collectionAddress;
-    const finalRecipient = recipient || DEFAULT_CONFIG.defaultRecipient;
-    
-    // Проверка адресов Solana
-    if (!solanaService.isValidSolanaAddress(finalTreeAddress)) {
-      return res.status(400).json({
+    // Получаем данные коллекции
+    const collection = collectionsService.getCollection(collectionId);
+    if (!collection) {
+      return res.status(404).json({
         success: false,
-        error: 'Неверный формат treeAddress'
+        error: `Коллекция ${collectionId} не найдена`
       });
     }
     
-    if (!solanaService.isValidSolanaAddress(finalCollectionAddress)) {
+    // Проверяем возможность минтинга
+    const mintCheck = collectionsService.canMintInCollection(collectionId);
+    if (!mintCheck.canMint) {
       return res.status(400).json({
         success: false,
-        error: 'Неверный формат collectionAddress'
+        error: `Минтинг невозможен: ${mintCheck.reason}`
       });
     }
     
+    // Получаем адреса из коллекции
+    const finalRecipient = recipient || process.env.DEFAULT_RECIPIENT;
+    
+    // Проверка адреса получателя
     if (!solanaService.isValidSolanaAddress(finalRecipient)) {
       return res.status(400).json({
         success: false,
@@ -75,10 +85,13 @@ router.post('/single', async (req, res) => {
       type: 'single',
       status: 'processing',
       createdAt: new Date().toISOString(),
+      collectionId: collectionId,
+      collection: {
+        name: collection.name,
+        symbol: collection.symbol
+      },
       recipient: finalRecipient,
-      metadata: metadata,
-      treeAddress: finalTreeAddress,
-      collectionAddress: finalCollectionAddress
+      metadata: metadata
     });
     
     // Немедленно возвращаем ID операции (асинхронный процесс)
@@ -87,6 +100,8 @@ router.post('/single', async (req, res) => {
       data: {
         operationId,
         status: 'processing',
+        collectionId,
+        collectionName: collection.name,
         message: 'Операция минтинга запущена'
       }
     });
@@ -96,16 +111,25 @@ router.post('/single', async (req, res) => {
       try {
         const operation = mintOperations.get(operationId);
         
+        // Собираем метаданные с учетом настроек коллекции
+        const finalMetadata = {
+          ...metadata,
+          symbol: metadata.symbol || collection.symbol,
+          sellerFeeBasisPoints: metadata.sellerFeeBasisPoints !== undefined 
+            ? metadata.sellerFeeBasisPoints 
+            : collection.metadata.sellerFeeBasisPoints
+        };
+        
         const result = await solanaService.mintSingleNFT({
-          treeAddress: finalTreeAddress,
-          collectionAddress: finalCollectionAddress,
+          treeAddress: collection.treeAddress,
+          collectionAddress: collection.collectionAddress,
           recipient: finalRecipient,
-          metadata: {
-            ...metadata,
-            sellerFeeBasisPoints: metadata.sellerFeeBasisPoints || DEFAULT_CONFIG.sellerFeeBasisPoints
-          },
-          maxAttempts: DEFAULT_CONFIG.maxRetries
+          metadata: finalMetadata,
+          maxAttempts: 3
         });
+        
+        // Обновляем статистику коллекции
+        collectionsService.updateMintStats(collectionId, 1);
         
         // Обновляем статус операции
         mintOperations.set(operationId, {
@@ -140,18 +164,24 @@ router.post('/single', async (req, res) => {
   }
 });
 
-// POST /api/mint/batch - Пакетный минт NFT
+// POST /api/mint/batch - Пакетный минт NFT в коллекции
 router.post('/batch', async (req, res) => {
   try {
     console.log('[Mint API] Запрос пакетного минтинга:', req.body);
     
     const { 
-      items, 
-      treeAddress, 
-      collectionAddress 
+      collectionId,  // ID коллекции
+      items
     } = req.body;
     
     // Валидация
+    if (!collectionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Обязательное поле: collectionId'
+      });
+    }
+    
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({
         success: false,
@@ -166,6 +196,24 @@ router.post('/batch', async (req, res) => {
       });
     }
     
+    // Получаем данные коллекции
+    const collection = collectionsService.getCollection(collectionId);
+    if (!collection) {
+      return res.status(404).json({
+        success: false,
+        error: `Коллекция ${collectionId} не найдена`
+      });
+    }
+    
+    // Проверяем возможность минтинга
+    const mintCheck = collectionsService.canMintInCollection(collectionId);
+    if (!mintCheck.canMint) {
+      return res.status(400).json({
+        success: false,
+        error: `Минтинг невозможен: ${mintCheck.reason}`
+      });
+    }
+    
     // Проверяем каждый элемент
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -177,25 +225,6 @@ router.post('/batch', async (req, res) => {
       }
     }
     
-    // Используем адреса из запроса или дефолтные
-    const finalTreeAddress = treeAddress || DEFAULT_CONFIG.treeAddress;
-    const finalCollectionAddress = collectionAddress || DEFAULT_CONFIG.collectionAddress;
-    
-    // Проверка адресов
-    if (!solanaService.isValidSolanaAddress(finalTreeAddress)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Неверный формат treeAddress'
-      });
-    }
-    
-    if (!solanaService.isValidSolanaAddress(finalCollectionAddress)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Неверный формат collectionAddress'
-      });
-    }
-    
     // Генерируем ID операции
     const operationId = uuidv4();
     
@@ -205,18 +234,21 @@ router.post('/batch', async (req, res) => {
       type: 'batch',
       status: 'processing',
       createdAt: new Date().toISOString(),
+      collectionId: collectionId,
+      collection: {
+        name: collection.name,
+        symbol: collection.symbol
+      },
       totalItems: items.length,
       processedItems: 0,
       successfulItems: 0,
       failedItems: 0,
       items: items.map((item, index) => ({
         index,
-        recipient: item.recipient || DEFAULT_CONFIG.defaultRecipient,
+        recipient: item.recipient || process.env.DEFAULT_RECIPIENT,
         metadata: item.metadata,
         status: 'pending'
-      })),
-      treeAddress: finalTreeAddress,
-      collectionAddress: finalCollectionAddress
+      }))
     });
     
     // Немедленно возвращаем ID операции
@@ -225,6 +257,8 @@ router.post('/batch', async (req, res) => {
       data: {
         operationId,
         status: 'processing',
+        collectionId,
+        collectionName: collection.name,
         totalItems: items.length,
         message: 'Пакетная операция минтинга запущена'
       }
@@ -233,23 +267,30 @@ router.post('/batch', async (req, res) => {
     // Асинхронное выполнение пакетного минтинга
     setImmediate(async () => {
       let operation = mintOperations.get(operationId);
+      let successCount = 0;
       
       for (let i = 0; i < items.length; i++) {
         const item = items[i];
-        const finalRecipient = item.recipient || DEFAULT_CONFIG.defaultRecipient;
+        const finalRecipient = item.recipient || process.env.DEFAULT_RECIPIENT;
         
         try {
           console.log(`[Mint API] Пакет ${operationId}: обработка элемента ${i + 1}/${items.length}`);
           
+          // Собираем метаданные с учетом настроек коллекции
+          const finalMetadata = {
+            ...item.metadata,
+            symbol: item.metadata.symbol || collection.symbol,
+            sellerFeeBasisPoints: item.metadata.sellerFeeBasisPoints !== undefined 
+              ? item.metadata.sellerFeeBasisPoints 
+              : collection.metadata.sellerFeeBasisPoints
+          };
+          
           const result = await solanaService.mintSingleNFT({
-            treeAddress: finalTreeAddress,
-            collectionAddress: finalCollectionAddress,
+            treeAddress: collection.treeAddress,
+            collectionAddress: collection.collectionAddress,
             recipient: finalRecipient,
-            metadata: {
-              ...item.metadata,
-              sellerFeeBasisPoints: item.metadata.sellerFeeBasisPoints || DEFAULT_CONFIG.sellerFeeBasisPoints
-            },
-            maxAttempts: DEFAULT_CONFIG.maxRetries
+            metadata: finalMetadata,
+            maxAttempts: 3
           });
           
           // Обновляем статус элемента
@@ -257,6 +298,7 @@ router.post('/batch', async (req, res) => {
           operation.items[i].status = 'completed';
           operation.items[i].result = result;
           operation.successfulItems++;
+          successCount++;
           
         } catch (error) {
           console.error(`[Mint API] Ошибка элемента ${i} в пакете ${operationId}:`, error.message);
@@ -277,6 +319,9 @@ router.post('/batch', async (req, res) => {
           await solanaService.sleep(2000);
         }
       }
+      
+      // Обновляем статистику коллекции
+      collectionsService.updateMintStats(collectionId, successCount);
       
       // Финализируем операцию
       operation = mintOperations.get(operationId);
@@ -321,6 +366,8 @@ router.get('/status/:id', (req, res) => {
           status: operation.status,
           createdAt: operation.createdAt,
           completedAt: operation.completedAt,
+          collectionId: operation.collectionId,
+          collection: operation.collection,
           recipient: operation.recipient,
           metadata: operation.metadata,
           result: operation.result,
@@ -336,6 +383,8 @@ router.get('/status/:id', (req, res) => {
           status: operation.status,
           createdAt: operation.createdAt,
           completedAt: operation.completedAt,
+          collectionId: operation.collectionId,
+          collection: operation.collection,
           totalItems: operation.totalItems,
           processedItems: operation.processedItems,
           successfulItems: operation.successfulItems,
@@ -358,7 +407,7 @@ router.get('/status/:id', (req, res) => {
 // GET /api/mint/operations - Список всех операций
 router.get('/operations', (req, res) => {
   try {
-    const { status, type, limit = 50 } = req.query;
+    const { status, type, collectionId, limit = 50 } = req.query;
     
     let operations = Array.from(mintOperations.values());
     
@@ -370,6 +419,11 @@ router.get('/operations', (req, res) => {
     // Фильтрация по типу
     if (type) {
       operations = operations.filter(op => op.type === type);
+    }
+    
+    // Фильтрация по коллекции
+    if (collectionId) {
+      operations = operations.filter(op => op.collectionId === collectionId);
     }
     
     // Сортировка по дате создания (новые первыми)
@@ -385,6 +439,8 @@ router.get('/operations', (req, res) => {
       status: op.status,
       createdAt: op.createdAt,
       completedAt: op.completedAt,
+      collectionId: op.collectionId,
+      collection: op.collection,
       ...(op.type === 'batch' && {
         totalItems: op.totalItems,
         processedItems: op.processedItems,

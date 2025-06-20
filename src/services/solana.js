@@ -87,14 +87,30 @@ class SolanaService {
     return this.umi;
   }
   
-  // Инициализация сервиса
+  // Инициализация сервиса с проверками
   async initialize() {
     if (this.initialized) return this.umi;
     
-    await this.connectToRpc();
-    this.initialized = true;
-    console.log("[Solana Service] Сервис инициализирован");
-    return this.umi;
+    // Проверка критических переменных окружения
+    if (!process.env.PRIVATE_KEY) {
+      console.warn("[Solana Service] PRIVATE_KEY не установлен, сервис будет недоступен");
+      return null;
+    }
+    
+    try {
+      await this.connectToRpc();
+      this.initialized = true;
+      console.log("[Solana Service] Сервис инициализирован");
+      return this.umi;
+    } catch (error) {
+      console.error("[Solana Service] Ошибка инициализации:", error.message);
+      throw error;
+    }
+  }
+  
+  // Проверка готовности сервиса
+  isReady() {
+    return this.initialized && this.umi !== null;
   }
   
   // Минт одного NFT (адаптировано из reference логики)
@@ -107,7 +123,13 @@ class SolanaService {
       maxAttempts = 3 
     } = params;
     
-    await this.initialize();
+    if (!this.isReady()) {
+      await this.initialize();
+    }
+    
+    if (!this.isReady()) {
+      throw new Error("Solana service не готов к работе");
+    }
     
     console.log(`[Solana Service] Начало минтинга NFT: ${metadata.name}`);
     
@@ -240,7 +262,14 @@ class SolanaService {
   
   // Получение баланса кошелька
   async getWalletBalance() {
-    await this.initialize();
+    if (!this.isReady()) {
+      await this.initialize();
+    }
+    
+    if (!this.isReady()) {
+      throw new Error("Solana service не готов к работе");
+    }
+    
     const balance = await this.umi.rpc.getBalance(this.umi.identity.publicKey);
     return balance.basisPoints / 1e9; // Конвертация в SOL
   }

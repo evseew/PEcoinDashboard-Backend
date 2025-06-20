@@ -1,124 +1,113 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-require('dotenv').config();
-
-// Routes
-const healthRoutes = require('./src/routes/health');
-const apiRoutes = require('./src/routes/api');
-const collectionsRoutes = require('./src/routes/collections');
-const uploadRoutes = require('./src/routes/upload');
-
-// Middleware
-const authMiddleware = require('./src/middleware/auth');
 
 const app = express();
-const PORT = process.env.PORT || process.env.VCAP_APP_PORT || 8080;
-
-// Log all environment variables for debugging
-console.log('=== ENVIRONMENT DEBUG ===');
-console.log('PORT:', process.env.PORT);
-console.log('VCAP_APP_PORT:', process.env.VCAP_APP_PORT);
-console.log('NODE_ENV:', process.env.NODE_ENV);
-console.log('All env keys:', Object.keys(process.env).filter(k => k.includes('PORT')));
-console.log('========================');
-
-// Trust proxy (для TimeWeb)
-app.set('trust proxy', 1);
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
 
-// Routes (без авторизации)
-app.use('/health', healthRoutes);
+// Логирование запросов
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
 
-// Basic info endpoint
+// Проверка критических компонентов при запуске
+function validateEnvironment() {
+  const warnings = [];
+  const errors = [];
+  
+  // Критические проверки
+  if (!process.env.API_KEY) {
+    warnings.push('API_KEY не установлен, аутентификация отключена');
+  }
+  
+  // Solana конфигурация (не критично для запуска, но важно для функционала)
+  if (!process.env.PRIVATE_KEY) {
+    warnings.push('PRIVATE_KEY не установлен, минтинг будет недоступен');
+  }
+  
+  if (!process.env.RPC_URL) {
+    warnings.push('RPC_URL не установлен, будет использован дефолтный');
+  }
+  
+  // Вывод предупреждений
+  if (warnings.length > 0) {
+    console.log('\n⚠️  Предупреждения конфигурации:');
+    warnings.forEach(warning => console.log(`   - ${warning}`));
+  }
+  
+  // Критические ошибки (если будут)
+  if (errors.length > 0) {
+    console.error('\n❌ Критические ошибки:');
+    errors.forEach(error => console.error(`   - ${error}`));
+    throw new Error('Невозможно запустить приложение из-за критических ошибок');
+  }
+  
+  if (warnings.length === 0) {
+    console.log('\n✅ Конфигурация окружения корректна');
+  }
+}
+
+// Выполняем проверку
+try {
+  validateEnvironment();
+} catch (error) {
+  console.error('Ошибка валидации конфигурации:', error.message);
+  process.exit(1);
+}
+
+// Import routes
+const healthRouter = require('./src/routes/health');
+const apiRouter = require('./src/routes/api');
+const authMiddleware = require('./src/middleware/auth');
+
+// Routes
+app.use('/health', healthRouter);
+app.use('/api', authMiddleware, apiRouter);
+
+// Root endpoint
 app.get('/', (req, res) => {
   res.json({
-    name: 'PEcamp NFT Backend',
+    success: true,
+    message: 'PEcamp NFT Backend',
     version: '1.0.0',
     status: 'running',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
     endpoints: {
       health: '/health',
-      api: '/api (requires X-API-Key header)',
-      docs: 'See PRD.md for API documentation'
+      api: '/api',
+      collections: '/api/collections',
+      mint: '/api/mint',
+      upload: '/api/upload'
     }
   });
 });
-
-// API routes (с авторизацией)
-app.use('/api', authMiddleware, apiRoutes);
-app.use('/api/collections', authMiddleware, collectionsRoutes);
-app.use('/api/upload', authMiddleware, uploadRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
     error: 'Endpoint not found',
-    availableEndpoints: ['/', '/health', '/api/test']
+    availableEndpoints: {
+      health: '/health',
+      api: '/api'
+    }
   });
 });
 
 // Error handler
 app.use((error, req, res, next) => {
-  console.error('Server error:', error);
+  console.error('Unhandled error:', error);
   res.status(500).json({
     success: false,
     error: 'Internal server error',
-    message: error.message
+    message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
   });
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully');
-  process.exit(0);
-});
-
-// Handle uncaught exceptions
-process.on('uncaughtException', (error) => {
-  console.error('UNCAUGHT EXCEPTION! 💥 Shutting down...');
-  console.error('Error:', error.name, error.message);
-  console.error('Stack:', error.stack);
-  process.exit(1);
-});
-
-// Handle unhandled promise rejections
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('UNHANDLED REJECTION! 💥 Shutting down...');
-  console.error('Reason:', reason);
-  console.error('Promise:', promise);
-  process.exit(1);
-});
-
-// Start server with error handling
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 NFT Backend server running on port ${PORT}`);
-  console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`⏰ Started at: ${new Date().toISOString()}`);
-  console.log(`🌐 Server address: http://0.0.0.0:${PORT}`);
-});
-
-// Handle server errors
-server.on('error', (error) => {
-  console.error('SERVER ERROR! 💥');
-  console.error('Error code:', error.code);
-  console.error('Error message:', error.message);
-  
-  if (error.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use`);
-  } else if (error.code === 'EACCES') {
-    console.error(`Permission denied to bind to port ${PORT}`);
-  }
-  
-  process.exit(1);
 });
 
 module.exports = app; 
