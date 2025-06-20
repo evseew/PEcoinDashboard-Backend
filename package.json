@@ -2,10 +2,10 @@
   "name": "pecoin-nft-backend",
   "version": "1.0.0",
   "description": "NFT Minting Backend for PEcamp Dashboard",
-  "main": "app.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node app.js",
-    "dev": "nodemon app.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "keywords": ["nft", "solana", "express", "api"],
   "author": "PEcamp",
