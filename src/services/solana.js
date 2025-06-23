@@ -88,7 +88,7 @@ class SolanaService {
         ]);
         
         console.log(`[Solana Service] ✅ Успешно подключились к: ${url}`);
-        console.log(`[Solana Service] Blockhash получен:`, typeof blockHash);
+        console.log(`[Solana Service] Blockhash тест пройден`);
         this.umi = tempUmi;
         return this.umi;
         
