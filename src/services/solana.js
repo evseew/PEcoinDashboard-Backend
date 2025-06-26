@@ -160,7 +160,7 @@ class SolanaService {
       sellerFeeBasisPoints: metadata.sellerFeeBasisPoints || 0,
       collection: { 
         key: publicKey(collectionAddress), 
-        verified: false 
+        verified: true // 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: cNFT ДОЛЖНЫ БЫТЬ verified для Phantom!
       },
       creators: metadata.creators || [
         { 
@@ -170,6 +170,25 @@ class SolanaService {
         }
       ],
     };
+    
+    // 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: синхронизируем creators с JSON метаданными
+    console.log('[Solana Service] 🔍 Проверка creators:', {
+      fromMetadata: metadata.creators,
+      fallback: metadataArgs.creators,
+      identityKey: this.umi.identity.publicKey.toString()
+    });
+    
+    // ВАЖНО: Если есть creators в metadata, используем их!
+    if (metadata.creators && Array.isArray(metadata.creators) && metadata.creators.length > 0) {
+      console.log('[Solana Service] ✅ Используем creators из metadata');
+      metadataArgs.creators = metadata.creators.map(creator => ({
+        address: typeof creator.address === 'string' ? creator.address : this.umi.identity.publicKey,
+        share: creator.share || 100,
+        verified: true // Устанавливаем verified при минтинге
+      }));
+    } else {
+      console.log('[Solana Service] ⚠️ Используем fallback creators');
+    }
     
     // Попытки минтинга с retry логикой (из reference)
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -415,5 +434,4 @@ class SolanaService {
   }
 }
 
-module.exports = SolanaService; 
 module.exports = SolanaService; 

@@ -29,11 +29,11 @@ const apiLimiter = rateLimit({
 // Строгий лимитер для операций минтинга
 const mintLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 минута
-  max: 5, // максимум 5 операций минтинга в минуту
+  max: 50, // максимум 50 операций минтинга в минуту
   message: {
     success: false,
     error: 'Mint rate limit exceeded',
-    message: 'Превышен лимит операций минтинга. Максимум 5 операций в минуту.',
+    message: 'Превышен лимит операций минтинга. Максимум 50 операций в минуту.',
     retryAfter: '1 minute'
   },
   standardHeaders: true,
@@ -126,7 +126,7 @@ const getRateLimitInfo = (req) => {
       },
       mint: {
         window: '1 minute', 
-        max: 5,
+        max: 50,
         scope: 'per API key or IP'
       },
       upload: {

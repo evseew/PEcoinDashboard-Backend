@@ -1,5 +1,6 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
+const bs58 = require("bs58");
 
 const router = express.Router();
 
@@ -9,6 +10,7 @@ const mintOperations = new Map();
 // Ленивая инициализация сервисов
 let solanaService = null;
 let collectionsService = null;
+let databaseService = null;
 
 function getSolanaService() {
   if (!solanaService) {
@@ -24,6 +26,14 @@ function getCollectionsService() {
     collectionsService = new CollectionsService();
   }
   return collectionsService;
+}
+
+function getDatabaseService() {
+  if (!databaseService) {
+    const DatabaseService = require('../services/database');
+    databaseService = new DatabaseService();
+  }
+  return databaseService;
 }
 
 // Конфигурация по умолчанию (из reference/config.js)
@@ -98,7 +108,7 @@ router.post('/single', async (req, res) => {
     const operationId = uuidv4();
     
     // Создаем запись операции
-    mintOperations.set(operationId, {
+    const operationData = {
       id: operationId,
       type: 'single',
       status: 'processing',
@@ -110,7 +120,13 @@ router.post('/single', async (req, res) => {
       },
       recipient: finalRecipient,
       metadata: metadata
-    });
+    };
+    
+    mintOperations.set(operationId, operationData);
+    
+    // Сохраняем в базу данных для персистентности
+    const databaseService = getDatabaseService();
+    await databaseService.saveMintOperation(operationData);
     
     // Немедленно возвращаем ID операции (асинхронный процесс)
     res.json({
@@ -135,8 +151,23 @@ router.post('/single', async (req, res) => {
           symbol: metadata.symbol || collection.symbol,
           sellerFeeBasisPoints: metadata.sellerFeeBasisPoints !== undefined 
             ? metadata.sellerFeeBasisPoints 
-            : collection.metadata.sellerFeeBasisPoints
+            : collection.metadata.sellerFeeBasisPoints,
+          // 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: используем creators из коллекции если не переданы
+          creators: metadata.creators || metadata.properties?.creators || [
+            {
+              address: process.env.DEFAULT_CREATOR_ADDRESS || process.env.DEFAULT_RECIPIENT,
+              share: 100,
+              verified: true
+            }
+          ]
         };
+        
+        console.log('[Mint API] 🔍 ДИАГНОСТИКА метаданных:', {
+          originalMetadata: metadata,
+          finalMetadata,
+          hasCreators: !!finalMetadata.creators,
+          creatorsCount: finalMetadata.creators?.length || 0
+        });
         
         const result = await solanaService.mintSingleNFT({
           treeAddress: collection.treeAddress,
@@ -150,10 +181,20 @@ router.post('/single', async (req, res) => {
         collectionsService.updateMintStats(collectionId, 1);
         
         // Обновляем статус операции
-        mintOperations.set(operationId, {
+        const updatedOperation = {
           ...operation,
           status: 'completed',
           completedAt: new Date().toISOString(),
+          result: result
+        };
+        
+        mintOperations.set(operationId, updatedOperation);
+        
+        // Обновляем в базе данных
+        const databaseService = getDatabaseService();
+        await databaseService.updateMintOperation(operationId, {
+          status: 'completed',
+          completedAt: updatedOperation.completedAt,
           result: result
         });
         
@@ -163,10 +204,20 @@ router.post('/single', async (req, res) => {
         console.error(`[Mint API] Ошибка операции ${operationId}:`, error.message);
         
         const operation = mintOperations.get(operationId);
-        mintOperations.set(operationId, {
+        const failedOperation = {
           ...operation,
           status: 'failed',
           completedAt: new Date().toISOString(),
+          error: error.message
+        };
+        
+        mintOperations.set(operationId, failedOperation);
+        
+        // Обновляем в базе данных
+        const databaseService = getDatabaseService();
+        await databaseService.updateMintOperation(operationId, {
+          status: 'failed',
+          completedAt: failedOperation.completedAt,
           error: error.message
         });
       }
@@ -304,7 +355,15 @@ router.post('/batch', async (req, res) => {
             symbol: item.metadata.symbol || collection.symbol,
             sellerFeeBasisPoints: item.metadata.sellerFeeBasisPoints !== undefined 
               ? item.metadata.sellerFeeBasisPoints 
-              : collection.metadata.sellerFeeBasisPoints
+              : collection.metadata.sellerFeeBasisPoints,
+            // 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: используем creators из коллекции если не переданы
+            creators: item.metadata.creators || item.metadata.properties?.creators || [
+              {
+                address: process.env.DEFAULT_CREATOR_ADDRESS || process.env.DEFAULT_RECIPIENT,
+                share: 100,
+                verified: true
+              }
+            ]
           };
           
           const result = await solanaService.mintSingleNFT({
@@ -427,34 +486,58 @@ router.get('/status/:id', (req, res) => {
 });
 
 // GET /api/mint/operations - Список всех операций
-router.get('/operations', (req, res) => {
+router.get('/operations', async (req, res) => {
   try {
     const { status, type, collectionId, limit = 50 } = req.query;
     
-    let operations = Array.from(mintOperations.values());
+    const databaseService = getDatabaseService();
     
-    // Фильтрация по статусу
-    if (status) {
-      operations = operations.filter(op => op.status === status);
+    // Пытаемся получить данные из базы данных
+    const dbResult = await databaseService.getMintOperations({
+      status,
+      type,
+      collectionId,
+      limit: parseInt(limit)
+    });
+    
+    let operations = [];
+    let total = 0;
+    
+    if (dbResult.success && dbResult.data && dbResult.data.length > 0) {
+      // Используем данные из базы
+      operations = dbResult.data;
+      total = dbResult.total || operations.length;
+      console.log(`[Mint API] Загружено ${operations.length} операций из базы данных`);
+    } else {
+      // Fallback на данные из памяти
+      operations = Array.from(mintOperations.values());
+      
+      // Фильтрация по статусу
+      if (status) {
+        operations = operations.filter(op => op.status === status);
+      }
+      
+      // Фильтрация по типу
+      if (type) {
+        operations = operations.filter(op => op.type === type);
+      }
+      
+      // Фильтрация по коллекции
+      if (collectionId) {
+        operations = operations.filter(op => op.collectionId === collectionId);
+      }
+      
+      // Сортировка по дате создания (новые первыми)
+      operations.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      
+      // Лимит
+      operations = operations.slice(0, parseInt(limit));
+      total = mintOperations.size;
+      
+      console.log(`[Mint API] Использованы данные из памяти: ${operations.length} операций`);
     }
     
-    // Фильтрация по типу
-    if (type) {
-      operations = operations.filter(op => op.type === type);
-    }
-    
-    // Фильтрация по коллекции
-    if (collectionId) {
-      operations = operations.filter(op => op.collectionId === collectionId);
-    }
-    
-    // Сортировка по дате создания (новые первыми)
-    operations.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-    
-    // Лимит
-    operations = operations.slice(0, parseInt(limit));
-    
-    // Убираем подробности для краткого списка
+    // Подготавливаем краткий список с основными данными
     const summary = operations.map(op => ({
       operationId: op.id,
       type: op.type,
@@ -463,6 +546,10 @@ router.get('/operations', (req, res) => {
       completedAt: op.completedAt,
       collectionId: op.collectionId,
       collection: op.collection,
+      recipient: op.recipient || null,
+      metadata: op.metadata || null,
+      result: op.result || null,
+      error: op.error || null,
       ...(op.type === 'batch' && {
         totalItems: op.totalItems,
         processedItems: op.processedItems,
@@ -475,7 +562,7 @@ router.get('/operations', (req, res) => {
       success: true,
       data: {
         operations: summary,
-        total: mintOperations.size
+        total: total
       }
     });
     

@@ -193,11 +193,25 @@ class LoggerService {
         const duration = Date.now() - startTime;
         const statusLevel = res.statusCode >= 400 ? 'warn' : 'info';
         
+        // Безопасно определяем размер ответа
+        let size = 0;
+        try {
+          if (typeof body === 'string') {
+            size = Buffer.byteLength(body, 'utf8');
+          } else if (Buffer.isBuffer(body)) {
+            size = body.length;
+          } else if (body !== undefined && body !== null) {
+            size = Buffer.byteLength(JSON.stringify(body), 'utf8');
+          }
+        } catch (_) {
+          size = 0; // fallback
+        }
+        
         // Логируем завершение запроса
         req.logger.log(statusLevel, 'response', `${req.method} ${req.url} - ${res.statusCode}`, {
           statusCode: res.statusCode,
           duration,
-          responseSize: Buffer.byteLength(body || '', 'utf8')
+          responseSize: size
         }, req);
         
         return originalSend.call(this, body);

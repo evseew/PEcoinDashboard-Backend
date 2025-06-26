@@ -196,6 +196,93 @@ router.post('/metadata', async (req, res) => {
   }
 });
 
+// POST /api/upload/image - Загрузка одного изображения (для NFT)
+router.post('/image', upload.single('image'), async (req, res) => {
+  let tempFile = null;
+  
+  try {
+    const file = req.file;
+    const customName = req.body.name;
+    
+    if (!file) {
+      return res.status(400).json({
+        success: false,
+        error: 'No image provided',
+        message: 'Please provide an image file'
+      });
+    }
+    
+    tempFile = file.path; // Для очистки
+    
+    console.log(`[Upload API] Загрузка изображения: ${file.originalname} (размер: ${file.size} bytes)`);
+    
+    const ipfsService = getIPFSService();
+    
+    // Формируем имя файла
+    const fileName = customName || file.originalname || `image-${Date.now()}`;
+    
+    // Загружаем на IPFS
+    const result = await ipfsService.uploadFile(file.path, {
+      name: fileName,
+      metadata: {
+        type: 'nft-image',
+        originalName: file.originalname,
+        mimeType: file.mimetype,
+        uploadedAt: new Date().toISOString()
+      }
+    });
+    
+    // Очищаем временный файл
+    await ipfsService.cleanupTempFile(tempFile);
+    
+    console.log(`[Upload API] ✅ Изображение загружено: ${result.ipfsHash}`);
+    
+    res.json({
+      success: true,
+      data: {
+        name: fileName,
+        originalName: file.originalname,
+        ipfsHash: result.ipfsHash,
+        ipfsUri: result.ipfsUri,
+        gatewayUrl: result.gatewayUrl,
+        size: result.size,
+        mimeType: file.mimetype,
+        timestamp: result.timestamp,
+        mock: result.mock || false
+      },
+      message: 'Image uploaded to IPFS successfully'
+    });
+    
+  } catch (error) {
+    console.error('[Upload API] Image upload error:', error);
+    
+    // Очищаем временный файл в случае ошибки
+    if (tempFile) {
+      try {
+        const ipfsService = getIPFSService();
+        await ipfsService.cleanupTempFile(tempFile);
+      } catch (cleanupError) {
+        console.error('Cleanup error:', cleanupError);
+      }
+    }
+    
+    // Специальная обработка multer ошибок
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({
+        success: false,
+        error: 'File too large',
+        message: 'Image size must be less than 10MB'
+      });
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: 'Image upload failed',
+      message: error.message
+    });
+  }
+});
+
 // GET /api/upload/status - Статус IPFS сервиса
 router.get('/status', async (req, res) => {
   try {

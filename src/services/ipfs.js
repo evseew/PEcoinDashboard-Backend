@@ -1,35 +1,52 @@
-const pinataSDK = require('@pinata/sdk');
 const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
 
 class IPFSService {
   constructor() {
-    this.pinata = null;
     this.isConnected = false;
-    this.initializePinata();
+    this.pinataApiUrl = 'https://api.pinata.cloud/pinning/pinFileToIPFS';
+    this.pinataJsonUrl = 'https://api.pinata.cloud/pinning/pinJSONToIPFS';
+    // Запускаем асинхронную инициализацию и сохраняем Promise,
+    // чтобы в последующих вызовах можно было дождаться готовности.
+    this.ready = this.initializePinata();
   }
 
-  // Инициализация Pinata SDK
+  // Инициализация Pinata
   async initializePinata() {
     try {
+      // Используем те же названия переменных что в reference коде
       const apiKey = process.env.PINATA_API_KEY;
-      const secretApiKey = process.env.PINATA_SECRET_API_KEY;
+      const secretKey = process.env.PINATA_SECRET_KEY || process.env.PINATA_SECRET_API_KEY; // Поддерживаем оба варианта
       
-      if (!apiKey || !secretApiKey) {
+      if (!apiKey || !secretKey) {
         console.log('[IPFS Service] Pinata credentials не найдены, используется мок-режим');
+        console.log('[IPFS Service] Нужны: PINATA_API_KEY и PINATA_SECRET_API_KEY');
         return;
       }
       
-      this.pinata = new pinataSDK(apiKey, secretApiKey);
+      // Создаем SDK клиент один раз
+      const PinataSDK = require('@pinata/sdk');
+      this.pinata = new PinataSDK({ pinataApiKey: apiKey, pinataSecretApiKey: secretKey });
       
-      // Проверяем соединение
-      const authResult = await this.pinata.testAuthentication();
-      
-      if (authResult.authenticated) {
-        this.isConnected = true;
-        console.log('[IPFS Service] ✅ Pinata подключен успешно');
-      } else {
-        console.log('[IPFS Service] ❌ Ошибка аутентификации Pinata');
+      // Проверяем соединение простым запросом к API
+      try {
+        const testResponse = await fetch('https://api.pinata.cloud/data/testAuthentication', {
+          method: 'GET',
+          headers: {
+            'pinata_api_key': apiKey,
+            'pinata_secret_api_key': secretKey,
+          }
+        });
+        
+        if (testResponse.ok) {
+          this.isConnected = true;
+          console.log('[IPFS Service] ✅ Pinata подключен успешно (HTTP API)');
+        } else {
+          console.log('[IPFS Service] ❌ Ошибка аутентификации Pinata:', testResponse.status);
+        }
+      } catch (testError) {
+        console.log('[IPFS Service] ❌ Ошибка тестирования Pinata:', testError.message);
       }
       
     } catch (error) {
@@ -38,34 +55,43 @@ class IPFSService {
     }
   }
 
-  // Загрузка файла на IPFS
+  // Загрузка файла на IPFS (HTTP API как в reference коде)
   async uploadFile(filePath, options = {}) {
+    // Дожидаемся окончания инициализации Pinata (важно после перезапуска сервера)
+    await this.ready;
     try {
       if (!this.isConnected) {
         return this.mockUploadFile(filePath, options);
       }
 
-      const readableStreamForFile = await fs.readFile(filePath);
-      
-      const pinataOptions = {
-        pinataMetadata: {
-          name: options.name || path.basename(filePath),
-          keyvalues: options.metadata || {}
-        },
-        pinataOptions: {
-          cidVersion: 0
+      const fileName = options.name || path.basename(filePath);
+
+      // Формируем метаданные (SDK принимает pinataMetadata отдельным объектом)
+      const pinataMetadata = {
+        name: fileName,
+        keyvalues: {
+          uploadTimestamp: new Date().toISOString(),
+          originalName: fileName,
+          ...options.metadata || {}
         }
       };
 
-      const result = await this.pinata.pinFileToIPFS(readableStreamForFile, pinataOptions);
-      
+      // Загружаем файл через Pinata SDK (надёжнее, чем raw HTTP)
+      const readableStream = require('fs').createReadStream(filePath);
+
+      const result = await this.pinata.pinFileToIPFS(readableStream, {
+        pinataMetadata
+      });
+
+      console.log(`[IPFS Service] ✅ Файл загружен: ${fileName}, CID: ${result.IpfsHash}`);
+
       return {
         success: true,
         ipfsHash: result.IpfsHash,
         ipfsUri: `ipfs://${result.IpfsHash}`,
         gatewayUrl: this.getGatewayUrl(result.IpfsHash),
-        size: result.PinSize,
-        timestamp: result.Timestamp
+        size: result.PinSize || null,
+        timestamp: result.Timestamp || new Date().toISOString()
       };
       
     } catch (error) {
@@ -76,22 +102,28 @@ class IPFSService {
 
   // Загрузка JSON объекта на IPFS
   async uploadJSON(jsonObject, options = {}) {
+    // Дожидаемся окончания инициализации Pinata
+    await this.ready;
     try {
       if (!this.isConnected) {
         return this.mockUploadJSON(jsonObject, options);
       }
 
-      const pinataOptions = {
-        pinataMetadata: {
-          name: options.name || `metadata-${Date.now()}.json`,
-          keyvalues: options.metadata || {}
-        },
-        pinataOptions: {
-          cidVersion: 0
+      const pinataMetadata = {
+        name: options.name || `metadata-${Date.now()}.json`,
+        keyvalues: {
+          uploadTimestamp: new Date().toISOString(),
+          type: 'metadata',
+          ...options.metadata || {}
         }
       };
 
-      const result = await this.pinata.pinJSONToIPFS(jsonObject, pinataOptions);
+      const result = await this.pinata.pinJSONToIPFS(jsonObject, {
+        pinataMetadata,
+        pinataOptions: { cidVersion: 0 }
+      });
+
+      console.log(`[IPFS Service] ✅ JSON загружен, CID: ${result.IpfsHash}`);
       
       return {
         success: true,
@@ -106,6 +138,27 @@ class IPFSService {
       console.error('[IPFS Service] Ошибка загрузки JSON:', error);
       throw new Error(`IPFS JSON upload failed: ${error.message}`);
     }
+  }
+
+  // Получение URL gateway
+  getGatewayUrl(ipfsHash) {
+    const gateway = process.env.DEDICATED_PINATA_GATEWAY;
+    
+    if (gateway) {
+      return `${gateway}/ipfs/${ipfsHash}`;
+    }
+    
+    return `https://gateway.pinata.cloud/ipfs/${ipfsHash}`;
+  }
+
+  // Проверка статуса сервиса
+  getServiceStatus() {
+    return {
+      connected: this.isConnected,
+      provider: this.isConnected ? 'Pinata IPFS (HTTP API)' : 'Mock IPFS',
+      gateway: this.getGatewayUrl(''),
+      authenticated: this.isConnected
+    };
   }
 
   // Пакетная загрузка файлов
@@ -161,31 +214,11 @@ class IPFSService {
     };
   }
 
-  // Получение URL gateway
-  getGatewayUrl(ipfsHash) {
-    const gateway = process.env.DEDICATED_PINATA_GATEWAY;
-    
-    if (gateway) {
-      return `${gateway}/ipfs/${ipfsHash}`;
-    }
-    
-    return `https://gateway.pinata.cloud/ipfs/${ipfsHash}`;
-  }
-
-  // Проверка статуса сервиса
-  getServiceStatus() {
-    return {
-      connected: this.isConnected,
-      provider: this.isConnected ? 'Pinata IPFS' : 'Mock IPFS',
-      gateway: this.getGatewayUrl(''),
-      authenticated: this.isConnected
-    };
-  }
-
   // Мок-функции для тестирования без реальных credentials
-
   mockUploadFile(filePath, options = {}) {
     const mockHash = `QmMock${Math.random().toString(36).substring(2, 15)}${Math.random().toString(36).substring(2, 15)}`;
+    
+    console.log(`[IPFS Service] 🔄 Mock upload: ${path.basename(filePath)} -> ${mockHash}`);
     
     return {
       success: true,
@@ -199,7 +232,9 @@ class IPFSService {
   }
 
   mockUploadJSON(jsonObject, options = {}) {
-    const mockHash = `QmJSON${Math.random().toString(36).substring(2, 15)}${Math.random().toString(36).substring(2, 15)}`;
+    const mockHash = `QmMockJSON${Math.random().toString(36).substring(2, 12)}`;
+    
+    console.log(`[IPFS Service] 🔄 Mock JSON upload -> ${mockHash}`);
     
     return {
       success: true,
@@ -212,7 +247,7 @@ class IPFSService {
     };
   }
 
-  // Утилита для паузы
+  // Вспомогательная функция задержки
   sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
@@ -221,8 +256,9 @@ class IPFSService {
   async cleanupTempFile(filePath) {
     try {
       await fs.unlink(filePath);
+      console.log(`[IPFS Service] 🗑️ Временный файл удален: ${filePath}`);
     } catch (error) {
-      console.log(`[IPFS Service] Не удалось удалить временный файл ${filePath}:`, error.message);
+      console.warn(`[IPFS Service] ⚠️ Не удалось удалить временный файл ${filePath}:`, error.message);
     }
   }
 }
