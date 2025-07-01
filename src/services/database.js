@@ -194,22 +194,21 @@ class DatabaseService {
         return this.mockUpdateCollectionStats(collectionId, mintedCount);
       }
 
+      // Обновляем поле minted в таблице nft_collections
       const { data, error } = await this.supabase
-        .from('collection_stats')
-        .upsert([{
-          collection_id: collectionId,
-          total_minted: mintedCount,
-          last_mint_at: new Date().toISOString(),
+        .from('nft_collections')
+        .update({
+          minted: mintedCount,
           updated_at: new Date().toISOString()
-        }], {
-          onConflict: 'collection_id'
-        });
+        })
+        .eq('id', collectionId); // используем originalId (UUID) для поиска
 
       if (error) {
         console.error('[Database Service] Ошибка обновления статистики:', error);
         return { success: false, error: error.message };
       }
 
+      console.log(`[Database Service] ✅ Обновлена статистика минтинга: коллекция ${collectionId}, заминчено ${mintedCount}`);
       return { success: true, data };
       
     } catch (error) {
@@ -249,6 +248,40 @@ class DatabaseService {
     }
   }
 
+  // Загрузка коллекций из Supabase
+  async getCollectionsFromDatabase() {
+    try {
+      if (!this.isConnected) {
+        console.log('[Database Service] Supabase не подключен, возвращаю пустой список коллекций');
+        return { success: false, data: [], error: 'Database not connected' };
+      }
+
+      const { data, error } = await this.supabase
+        .from('nft_collections')
+        .select('*')
+        .eq('is_public', true);
+
+      if (error) {
+        console.error('[Database Service] Ошибка загрузки коллекций:', error);
+        return { success: false, data: [], error: error.message };
+      }
+
+      // Трансформируем данные из Supabase формата в Backend формат
+      const transformedCollections = data.map(collection => this.transformCollectionFromDB(collection));
+
+      console.log(`[Database Service] ✅ Загружено ${transformedCollections.length} коллекций из Supabase`);
+      
+      return {
+        success: true,
+        data: transformedCollections
+      };
+      
+    } catch (error) {
+      console.error('[Database Service] Исключение при загрузке коллекций:', error);
+      return { success: false, data: [], error: error.message };
+    }
+  }
+
   // Проверка статуса сервиса
   getServiceStatus() {
     return {
@@ -277,6 +310,35 @@ class DatabaseService {
       createdAt: dbOperation.created_at,
       completedAt: dbOperation.completed_at,
       error: dbOperation.error_message
+    };
+  }
+
+  // Трансформация коллекции из Supabase формата в Backend формат
+  transformCollectionFromDB(dbCollection) {
+    return {
+      id: dbCollection.id, // Используем UUID как основной ID для совместимости с Frontend
+      name: dbCollection.name,
+      symbol: dbCollection.symbol,
+      description: dbCollection.description || '',
+      treeAddress: dbCollection.tree_address || '',
+      collectionAddress: dbCollection.collection_address || '',
+      status: dbCollection.status || 'active',
+      allowMinting: dbCollection.allow_minting || false,
+      totalMinted: dbCollection.minted || 0,
+      maxSupply: dbCollection.capacity || 10000,
+      createdAt: dbCollection.created_at || new Date().toISOString(),
+      updatedAt: dbCollection.updated_at || new Date().toISOString(),
+      metadata: {
+        image: dbCollection.image_url || '',
+        externalUrl: dbCollection.external_url || '',
+        sellerFeeBasisPoints: 0 // дефолтное значение, можно добавить поле в Supabase
+      },
+      // Дополнительные поля из Supabase для полноты
+      hasValidTree: dbCollection.has_valid_tree || false,
+      supportsDas: dbCollection.supports_das || false,
+      rpcUsed: dbCollection.rpc_used || '',
+      depth: dbCollection.depth || 20,
+      bufferSize: dbCollection.buffer_size || 64
     };
   }
 
@@ -310,6 +372,129 @@ class DatabaseService {
   mockLogEvent(event) {
     console.log('[Database Service] Mock: Событие', event.type, event.data);
     return { success: true, mock: true };
+  }
+
+  // Создать новую коллекцию в Supabase
+  async createCollectionInDatabase(collectionData) {
+    if (!this.supabase) {
+      console.log('[Database Service] Supabase недоступен, используем мок создание коллекции');
+      return this.mockCreateCollection(collectionData);
+    }
+
+    try {
+      const dbData = {
+        id: collectionData.id,
+        name: collectionData.name,
+        symbol: collectionData.symbol,
+        description: collectionData.description || '',
+        tree_address: collectionData.treeAddress || '',
+        collection_address: collectionData.collectionAddress || '',
+        status: collectionData.status || 'draft',
+        allow_minting: collectionData.allowMinting || false,
+        minted: collectionData.totalMinted || 0,
+        capacity: collectionData.maxSupply || 10000,
+        image_url: collectionData.metadata?.image || '',
+        external_url: collectionData.metadata?.externalUrl || '',
+        created_at: collectionData.createdAt || new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+
+      const { data, error } = await this.supabase
+        .from('nft_collections')
+        .insert([dbData])
+        .select()
+        .single();
+
+      if (error) {
+        console.error('[Database Service] Ошибка создания коллекции в Supabase:', error);
+        return this.mockCreateCollection(collectionData);
+      }
+
+      console.log(`[Database Service] ✅ Коллекция ${collectionData.name} создана в Supabase`);
+      return this.transformCollectionFromDB(data);
+
+    } catch (error) {
+      console.error('[Database Service] Ошибка создания коллекции:', error);
+      return this.mockCreateCollection(collectionData);
+    }
+  }
+
+  // Обновить коллекцию в Supabase
+  async updateCollectionInDatabase(collectionId, updates) {
+    if (!this.supabase) {
+      console.log('[Database Service] Supabase недоступен, используем мок обновление коллекции');
+      return this.mockUpdateCollection(collectionId, updates);
+    }
+
+    try {
+      const dbUpdates = {
+        updated_at: new Date().toISOString()
+      };
+
+      // Маппинг полей из Backend формата в Supabase формат
+      if (updates.name !== undefined) dbUpdates.name = updates.name;
+      if (updates.symbol !== undefined) dbUpdates.symbol = updates.symbol;
+      if (updates.description !== undefined) dbUpdates.description = updates.description;
+      if (updates.treeAddress !== undefined) dbUpdates.tree_address = updates.treeAddress;
+      if (updates.collectionAddress !== undefined) dbUpdates.collection_address = updates.collectionAddress;
+      if (updates.status !== undefined) dbUpdates.status = updates.status;
+      if (updates.allowMinting !== undefined) dbUpdates.allow_minting = updates.allowMinting;
+      if (updates.totalMinted !== undefined) dbUpdates.minted = updates.totalMinted;
+      if (updates.maxSupply !== undefined) dbUpdates.capacity = updates.maxSupply;
+      if (updates.metadata?.image !== undefined) dbUpdates.image_url = updates.metadata.image;
+      if (updates.metadata?.externalUrl !== undefined) dbUpdates.external_url = updates.metadata.externalUrl;
+
+      const { data, error } = await this.supabase
+        .from('nft_collections')
+        .update(dbUpdates)
+        .eq('id', collectionId)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('[Database Service] Ошибка обновления коллекции в Supabase:', error);
+        return this.mockUpdateCollection(collectionId, updates);
+      }
+
+      console.log(`[Database Service] ✅ Коллекция ${collectionId} обновлена в Supabase`);
+      return this.transformCollectionFromDB(data);
+
+    } catch (error) {
+      console.error('[Database Service] Ошибка обновления коллекции:', error);
+      return this.mockUpdateCollection(collectionId, updates);
+    }
+  }
+
+  // 🔧 Мок-методы для fallback (когда Supabase недоступен)
+  
+  // Мок создания коллекции
+  mockCreateCollection(collectionData) {
+    console.log(`[Database Service] Мок: создание коллекции ${collectionData.name}`);
+    
+    // Генерируем UUID если не передан
+    const id = collectionData.id || require('crypto').randomUUID();
+    
+    const mockCollection = {
+      ...collectionData,
+      id,
+      createdAt: collectionData.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    
+    return mockCollection;
+  }
+
+  // Мок обновления коллекции  
+  mockUpdateCollection(collectionId, updates) {
+    console.log(`[Database Service] Мок: обновление коллекции ${collectionId}`);
+    
+    // В мок-режиме просто возвращаем обновленные данные
+    // В реальной ситуации здесь бы был поиск в локальном кеше
+    return {
+      id: collectionId,
+      ...updates,
+      updatedAt: new Date().toISOString()
+    };
   }
 }
 

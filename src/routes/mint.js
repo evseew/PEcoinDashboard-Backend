@@ -76,7 +76,7 @@ router.post('/single', async (req, res) => {
     const solanaService = getSolanaService();
     
     // Получаем данные коллекции
-    const collection = collectionsService.getCollection(collectionId);
+    const collection = await collectionsService.getCollection(collectionId);
     if (!collection) {
       return res.status(404).json({
         success: false,
@@ -85,7 +85,7 @@ router.post('/single', async (req, res) => {
     }
     
     // Проверяем возможность минтинга
-    const mintCheck = collectionsService.canMintInCollection(collectionId);
+    const mintCheck = await collectionsService.canMintInCollection(collectionId);
     if (!mintCheck.canMint) {
       return res.status(400).json({
         success: false,
@@ -178,7 +178,7 @@ router.post('/single', async (req, res) => {
         });
         
         // Обновляем статистику коллекции
-        collectionsService.updateMintStats(collectionId, 1);
+        await collectionsService.updateMintStats(collectionId, 1);
         
         // Обновляем статус операции
         const updatedOperation = {
@@ -270,7 +270,7 @@ router.post('/batch', async (req, res) => {
     const solanaService = getSolanaService();
     
     // Получаем данные коллекции
-    const collection = collectionsService.getCollection(collectionId);
+    const collection = await collectionsService.getCollection(collectionId);
     if (!collection) {
       return res.status(404).json({
         success: false,
@@ -279,7 +279,7 @@ router.post('/batch', async (req, res) => {
     }
     
     // Проверяем возможность минтинга
-    const mintCheck = collectionsService.canMintInCollection(collectionId);
+    const mintCheck = await collectionsService.canMintInCollection(collectionId);
     if (!mintCheck.canMint) {
       return res.status(400).json({
         success: false,
@@ -402,7 +402,7 @@ router.post('/batch', async (req, res) => {
       }
       
       // Обновляем статистику коллекции
-      collectionsService.updateMintStats(collectionId, successCount);
+      await collectionsService.updateMintStats(collectionId, successCount);
       
       // Финализируем операцию
       operation = mintOperations.get(operationId);

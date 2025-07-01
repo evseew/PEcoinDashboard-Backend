@@ -14,7 +14,7 @@ function getCollectionsService() {
 }
 
 // GET /api/collections - Получить список коллекций
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { status, allowMinting, limit, offset } = req.query;
     
@@ -25,7 +25,7 @@ router.get('/', (req, res) => {
     if (offset) filters.offset = parseInt(offset);
     
     const collectionsService = getCollectionsService();
-    const result = collectionsService.getCollections(filters);
+    const result = await collectionsService.getCollections(filters);
     
     res.json({
       success: true,
@@ -42,10 +42,10 @@ router.get('/', (req, res) => {
 });
 
 // GET /api/collections/active - Получить только активные коллекции для минтинга
-router.get('/active', (req, res) => {
+router.get('/active', async (req, res) => {
   try {
     const collectionsService = getCollectionsService();
-    const activeCollections = collectionsService.getActiveCollections();
+    const activeCollections = await collectionsService.getActiveCollections();
     
     res.json({
       success: true,
@@ -65,11 +65,11 @@ router.get('/active', (req, res) => {
 });
 
 // GET /api/collections/:id - Получить конкретную коллекцию
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const collectionsService = getCollectionsService();
-    const collection = collectionsService.getCollection(id);
+    const collection = await collectionsService.getCollection(id);
     
     if (!collection) {
       return res.status(404).json({
@@ -93,11 +93,11 @@ router.get('/:id', (req, res) => {
 });
 
 // GET /api/collections/:id/mint-check - Проверить возможность минтинга
-router.get('/:id/mint-check', (req, res) => {
+router.get('/:id/mint-check', async (req, res) => {
   try {
     const { id } = req.params;
     const collectionsService = getCollectionsService();
-    const mintCheck = collectionsService.canMintInCollection(id);
+    const mintCheck = await collectionsService.canMintInCollection(id);
     
     res.json({
       success: true,
@@ -114,7 +114,7 @@ router.get('/:id/mint-check', (req, res) => {
 });
 
 // POST /api/collections - Создать новую коллекцию
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const collectionData = req.body;
     
@@ -127,7 +127,7 @@ router.post('/', (req, res) => {
     }
     
     const collectionsService = getCollectionsService();
-    const collection = collectionsService.createCollection(collectionData);
+    const collection = await collectionsService.createCollection(collectionData);
     
     res.status(201).json({
       success: true,
@@ -145,13 +145,13 @@ router.post('/', (req, res) => {
 });
 
 // PUT /api/collections/:id - Обновить коллекцию
-router.put('/:id', (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const updates = req.body;
     
     const collectionsService = getCollectionsService();
-    const updatedCollection = collectionsService.updateCollection(id, updates);
+    const updatedCollection = await collectionsService.updateCollection(id, updates);
     
     if (!updatedCollection) {
       return res.status(404).json({

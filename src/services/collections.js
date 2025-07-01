@@ -1,73 +1,66 @@
 // services/collections.js
 // Сервис для управления коллекциями NFT
 
+const DatabaseService = require('./database');
+
 class CollectionsService {
   constructor() {
-    // В продакшене это будет Supabase/DB
     this.collections = new Map();
-    this.initMockCollections();
+    this.isInitialized = false;
+    this.database = null;
+    
+    // Инициализируем коллекции из Supabase
+    this.initializeCollections().catch(error => {
+      console.error('[Collections Service] Ошибка инициализации коллекций:', error);
+    });
   }
 
-  // Инициализация мок-данных на основе reference
-  initMockCollections() {
-    // Коллекция из reference/ (рабочая)
-    this.collections.set('pe-stickers', {
-      id: 'pe-stickers',
-      name: 'PE Stickers',
-      symbol: 'PES',
-      description: 'Коллекция стикеров от PE School',
-      treeAddress: 'DKHMY8Nn7xofN73wCiDBLZe3qzVyA2B8X1KCE2zsJRyH',
-      collectionAddress: 'F1mKEFsnEz8bm4Ty2mTFrgsCcXmmMroQzRFEzc2s7B8e',
-      status: 'active',
-      allowMinting: true,
-      totalMinted: 0,
-      maxSupply: 10000,
-      createdAt: '2024-01-15T10:00:00Z',
-      metadata: {
-        image: 'https://amber-accused-tortoise-973.mypinata.cloud/ipfs/QmPEStickers',
-        externalUrl: 'https://pe-school.com/stickers',
-        sellerFeeBasisPoints: 0
+  // Инициализация коллекций из Supabase
+  async initializeCollections() {
+    try {
+      this.database = new DatabaseService();
+      
+      console.log('[Collections Service] Загружаем коллекции из Supabase...');
+      const supabaseCollections = await this.database.getCollectionsFromDatabase();
+      
+      if (supabaseCollections && supabaseCollections.length > 0) {
+        // Загружаем данные из Supabase
+        supabaseCollections.forEach(collection => {
+          this.collections.set(collection.id, collection);
+        });
+        console.log(`[Collections Service] ✅ Загружено ${supabaseCollections.length} коллекций из Supabase`);
+      } else {
+        console.log('[Collections Service] ⚠️ Коллекции из Supabase не найдены, используем пустой набор');
       }
-    });
+      
+    } catch (error) {
+      console.error('[Collections Service] Ошибка загрузки из Supabase:', error);
+      console.log('[Collections Service] 📄 Используем пустой набор коллекций');
+    } finally {
+      this.isInitialized = true;
+    }
+  }
 
-    // Другие коллекции для примера
-    this.collections.set('pe-badges', {
-      id: 'pe-badges',
-      name: 'PE Achievement Badges',
-      symbol: 'PEB',
-      description: 'Достижения учеников PE School',
-      treeAddress: '', // Будет заполнен при создании
-      collectionAddress: '', // Будет заполнен при создании
-      status: 'draft',
-      allowMinting: false,
-      totalMinted: 0,
-      maxSupply: 5000,
-      createdAt: '2024-01-20T12:00:00Z',
-      metadata: {
-        sellerFeeBasisPoints: 250 // 2.5%
-      }
-    });
-
-    this.collections.set('pe-certificates', {
-      id: 'pe-certificates',
-      name: 'PE Course Certificates',
-      symbol: 'PEC',
-      description: 'Сертификаты об окончании курсов',
-      treeAddress: '', // Пользователь настроит
-      collectionAddress: '', // Пользователь настроит
-      status: 'pending',
-      allowMinting: false,
-      totalMinted: 0,
-      maxSupply: 1000,
-      createdAt: '2024-01-25T14:00:00Z',
-      metadata: {
-        sellerFeeBasisPoints: 0
-      }
-    });
+  // Проверка готовности сервиса
+  async waitForInitialization() {
+    if (this.isInitialized) return;
+    
+    // Ждем инициализации максимум 10 секунд
+    let attempts = 0;
+    while (!this.isInitialized && attempts < 100) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      attempts++;
+    }
+    
+    if (!this.isInitialized) {
+      console.warn('[Collections Service] Таймаут инициализации, используются текущие данные');
+    }
   }
 
   // Получить все коллекции с фильтрацией
-  getCollections(filters = {}) {
+  async getCollections(filters = {}) {
+    await this.waitForInitialization();
+    
     const { status, allowMinting, limit = 50, offset = 0 } = filters;
     
     let collections = Array.from(this.collections.values());
@@ -100,19 +93,23 @@ class CollectionsService {
   }
 
   // Получить коллекцию по ID
-  getCollection(id) {
+  async getCollection(id) {
+    await this.waitForInitialization();
     return this.collections.get(id) || null;
   }
 
   // Получить активные коллекции для минтинга
-  getActiveCollections() {
+  async getActiveCollections() {
+    await this.waitForInitialization();
     return Array.from(this.collections.values())
       .filter(c => c.status === 'active' && c.allowMinting);
   }
 
   // Проверить возможность минтинга в коллекции
-  canMintInCollection(collectionId) {
-    const collection = this.getCollection(collectionId);
+  async canMintInCollection(collectionId) {
+    await this.waitForInitialization();
+    
+    const collection = await this.getCollection(collectionId);
     
     if (!collection) {
       return { canMint: false, reason: 'Коллекция не найдена' };
@@ -138,16 +135,32 @@ class CollectionsService {
   }
 
   // Обновить статистику минтинга
-  updateMintStats(collectionId, mintedCount) {
+  async updateMintStats(collectionId, mintedCount) {
+    await this.waitForInitialization();
+    
     const collection = this.collections.get(collectionId);
     if (collection) {
+      // Обновляем локальные данные
       collection.totalMinted += mintedCount;
+      collection.updatedAt = new Date().toISOString();
       this.collections.set(collectionId, collection);
+      
+      // Синхронизируем с Supabase если доступен
+      try {
+        // Используем collectionId (который теперь UUID) для обновления Supabase
+        await this.database.updateCollectionStats(collectionId, collection.totalMinted);
+        console.log(`[Collections Service] ✅ Статистика коллекции ${collectionId} синхронизирована с Supabase`);
+      } catch (error) {
+        console.error(`[Collections Service] Ошибка синхронизации статистики для ${collectionId}:`, error);
+        // Продолжаем работу даже если синхронизация не удалась
+      }
     }
   }
 
   // Создать новую коллекцию (базовая структура)
-  createCollection(data) {
+  async createCollection(data) {
+    await this.waitForInitialization();
+    
     const id = data.id || data.name.toLowerCase().replace(/\s+/g, '-');
     
     const collection = {
@@ -169,12 +182,24 @@ class CollectionsService {
       }
     };
     
-    this.collections.set(id, collection);
-    return collection;
+    // Сохраняем коллекцию в Supabase
+    try {
+      const savedCollection = await this.database.createCollectionInDatabase(collection);
+      // Обновляем локальные данные с данными из Supabase (может содержать изменения)
+      this.collections.set(savedCollection.id, savedCollection);
+      return savedCollection;
+    } catch (error) {
+      console.error('[Collections Service] Ошибка создания коллекции в Supabase:', error);
+      // Сохраняем локально как fallback
+      this.collections.set(id, collection);
+      return collection;
+    }
   }
 
   // Обновить коллекцию
-  updateCollection(id, updates) {
+  async updateCollection(id, updates) {
+    await this.waitForInitialization();
+    
     const collection = this.collections.get(id);
     if (!collection) return null;
     
@@ -185,8 +210,18 @@ class CollectionsService {
       updatedAt: new Date().toISOString()
     };
     
-    this.collections.set(id, updatedCollection);
-    return updatedCollection;
+    // Обновляем коллекцию в Supabase
+    try {
+      const savedCollection = await this.database.updateCollectionInDatabase(id, updates);
+      // Обновляем локальные данные с данными из Supabase
+      this.collections.set(id, savedCollection);
+      return savedCollection;
+    } catch (error) {
+      console.error('[Collections Service] Ошибка обновления коллекции в Supabase:', error);
+      // Обновляем локально как fallback
+      this.collections.set(id, updatedCollection);
+      return updatedCollection;
+    }
   }
 
   // Валидация данных коллекции для минтинга
