@@ -51,49 +51,53 @@ router.post('/single', async (req, res) => {
     console.log('[Mint API] Запрос одиночного минтинга:', req.body);
     
     const { 
-      collectionId,  // ID коллекции вместо адресов
+      collection,    // 🔄 ИЗМЕНЕНИЕ: теперь принимаем полный объект коллекции
       recipient, 
       metadata
     } = req.body;
     
     // Валидация обязательных полей
-    if (!collectionId) {
+    if (!collection || !collection.id || !collection.name) {
       return res.status(400).json({
         success: false,
-        error: 'Обязательное поле: collectionId'
+        error: 'Обязательные поля: collection.id, collection.name'
       });
     }
-    
+
     if (!metadata || !metadata.name || !metadata.uri) {
       return res.status(400).json({
         success: false,
         error: 'Отсутствуют обязательные поля: metadata.name и metadata.uri'
       });
     }
-    
-    // Инициализируем сервисы только при необходимости
-    const collectionsService = getCollectionsService();
-    const solanaService = getSolanaService();
-    
-    // Получаем данные коллекции
-    const collection = await collectionsService.getCollection(collectionId);
-    if (!collection) {
-      return res.status(404).json({
-        success: false,
-        error: `Коллекция ${collectionId} не найдена`
-      });
-    }
-    
-    // Проверяем возможность минтинга
-    const mintCheck = await collectionsService.canMintInCollection(collectionId);
-    if (!mintCheck.canMint) {
+
+    // Валидация адресов блокчейна в коллекции
+    if (!collection.treeAddress || !collection.collectionAddress) {
       return res.status(400).json({
         success: false,
-        error: `Минтинг невозможен: ${mintCheck.reason}`
+        error: 'В коллекции отсутствуют обязательные адреса: treeAddress, collectionAddress'
+      });
+    }
+
+    // Инициализируем только Solana сервис (Collections Service больше не нужен)
+    const solanaService = getSolanaService();
+    
+    // Валидация адресов Solana
+    if (!solanaService.isValidSolanaAddress(collection.treeAddress)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Неверный формат treeAddress'
+      });
+    }
+
+    if (!solanaService.isValidSolanaAddress(collection.collectionAddress)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Неверный формат collectionAddress'
       });
     }
     
-    // Получаем адреса из коллекции
+    // Получаем адреса из переданной коллекции
     const finalRecipient = recipient || process.env.DEFAULT_RECIPIENT;
     
     // Проверка адреса получателя
@@ -107,16 +111,16 @@ router.post('/single', async (req, res) => {
     // Генерируем ID операции
     const operationId = uuidv4();
     
-    // Создаем запись операции
+    // Создаем запись операции с данными из переданной коллекции
     const operationData = {
       id: operationId,
       type: 'single',
       status: 'processing',
       createdAt: new Date().toISOString(),
-      collectionId: collectionId,
+      collectionId: collection.id,
       collection: {
         name: collection.name,
-        symbol: collection.symbol
+        symbol: collection.symbol || 'cNFT'
       },
       recipient: finalRecipient,
       metadata: metadata
@@ -134,7 +138,7 @@ router.post('/single', async (req, res) => {
       data: {
         operationId,
         status: 'processing',
-        collectionId,
+        collectionId: collection.id,
         collectionName: collection.name,
         message: 'Операция минтинга запущена'
       }
@@ -148,14 +152,14 @@ router.post('/single', async (req, res) => {
         // Собираем метаданные с учетом настроек коллекции
         const finalMetadata = {
           ...metadata,
-          symbol: metadata.symbol || collection.symbol,
+          symbol: metadata.symbol || collection.symbol || 'cNFT',
           sellerFeeBasisPoints: metadata.sellerFeeBasisPoints !== undefined 
             ? metadata.sellerFeeBasisPoints 
-            : collection.metadata.sellerFeeBasisPoints,
+            : (collection.sellerFeeBasisPoints || 0),
           // 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: используем creators из коллекции если не переданы
           creators: metadata.creators || metadata.properties?.creators || [
             {
-              address: process.env.DEFAULT_CREATOR_ADDRESS || process.env.DEFAULT_RECIPIENT,
+              address: collection.creatorAddress || process.env.DEFAULT_CREATOR_ADDRESS || process.env.DEFAULT_RECIPIENT,
               share: 100,
               verified: true
             }
@@ -166,7 +170,13 @@ router.post('/single', async (req, res) => {
           originalMetadata: metadata,
           finalMetadata,
           hasCreators: !!finalMetadata.creators,
-          creatorsCount: finalMetadata.creators?.length || 0
+          creatorsCount: finalMetadata.creators?.length || 0,
+          collectionData: {
+            id: collection.id,
+            name: collection.name,
+            treeAddress: collection.treeAddress,
+            collectionAddress: collection.collectionAddress
+          }
         });
         
         const result = await solanaService.mintSingleNFT({
@@ -177,8 +187,9 @@ router.post('/single', async (req, res) => {
           maxAttempts: 3
         });
         
-        // Обновляем статистику коллекции
-        await collectionsService.updateMintStats(collectionId, 1);
+        // 🔄 ИЗМЕНЕНИЕ: Если нужно, можем обновить статистику коллекции локально
+        // Но не будем зависеть от Collections Service и Supabase
+        console.log(`[Mint API] ✅ NFT успешно заминтен в коллекции ${collection.name}`);
         
         // Обновляем статус операции
         const updatedOperation = {
