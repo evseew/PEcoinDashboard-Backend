@@ -1,36 +1,46 @@
-# 🔧 Настройка переменных окружения
+# Environment Variables for PEcoin Dashboard Backend
 
-Создайте файл `.env` в корне проекта со следующими переменными:
-
-## Обязательные переменные для мульти-коллекций
-
-```bash
-# API Configuration
+## Core Configuration
 NODE_ENV=production
 PORT=8080
-API_KEY=test_api_key_2024
 
-# Solana Blockchain (ВАЖНО: добавьте свой PRIVATE_KEY)
-PRIVATE_KEY=your_base58_private_key_here
-# Для Alchemy (рекомендуется):
-RPC_URL=https://solana-mainnet.g.alchemy.com/v2/YOUR-ALCHEMY-API-KEY
-# Или стандартный публичный RPC:
-# RPC_URL=https://api.mainnet-beta.solana.com
-BACKUP_RPC_URLS=https://api.mainnet-beta.solana.com,https://solana-api.projectserum.com
+## Solana Configuration  
+RPC_URL=https://api.mainnet-beta.solana.com
+RPC_WS_URL=wss://api.mainnet-beta.solana.com
 
-# Default Settings (fallback значения)
-DEFAULT_RECIPIENT=A27VztuDLCA3FwnELbCnoGQW83Rk5xfrL7A79A8xbDTP
+## ✅ НОВОЕ: DAS API Configuration для решения проблемы индексации NFT
 
-# IPFS Storage (обновите на свои ключи Pinata)
+# ✅ РЕКОМЕНДУЕМЫЕ ПРОВАЙДЕРЫ:
+
+# 1. Alchemy (если у вас уже есть аккаунт) - ИСПОЛЬЗУЙТЕ ЭТОТ!
+DAS_API_URL=https://solana-mainnet.g.alchemy.com/v2/YOUR-ALCHEMY-API-KEY
+DAS_API_KEY=YOUR-ALCHEMY-API-KEY
+
+# 2. Helius DAS API (альтернатива)
+# DAS_API_URL=https://rpc.helius.xyz/?api-key=YOUR_HELIUS_API_KEY  
+# DAS_API_KEY=YOUR_HELIUS_API_KEY
+
+# 3. Другие провайдеры:
+# - Triton: https://api.triton.one/rpc
+# - QuickNode: https://your-endpoint.quiknode.pro/YOUR_API_KEY/
+# - Metaplex: https://api.metaplex.solana.com
+
+## Wallet Configuration
+WALLET_PRIVATE_KEY=your_base58_private_key_here
+MERKLE_TREE_AUTHORITY=your_tree_authority_public_key
+
+## IPFS Configuration
 PINATA_API_KEY=your_pinata_api_key
 PINATA_SECRET_API_KEY=your_pinata_secret_key
 PINATA_JWT=your_pinata_jwt
 DEDICATED_PINATA_GATEWAY=https://amber-accused-tortoise-973.mypinata.cloud
 
-# Database (для будущей интеграции с Supabase)
+## Database (для будущей интеграции с Supabase)
 SUPABASE_URL=your_supabase_url
 SUPABASE_ANON_KEY=your_supabase_anon_key
-```
+
+## Default Settings (fallback значения)
+DEFAULT_RECIPIENT=A27VztuDLCA3FwnELbCnoGQW83Rk5xfrL7A79A8xbDTP
 
 ## ✅ Изменения в архитектуре:
 

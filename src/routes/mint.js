@@ -11,6 +11,7 @@ const mintOperations = new Map();
 let solanaService = null;
 let collectionsService = null;
 let databaseService = null;
+let indexingMonitor = null; // ✅ НОВОЕ
 
 function getSolanaService() {
   if (!solanaService) {
@@ -22,7 +23,7 @@ function getSolanaService() {
 
 function getCollectionsService() {
   if (!collectionsService) {
-    const CollectionsService = require('../services/collections');
+    const { CollectionsService } = require('../services/collections');
     collectionsService = new CollectionsService();
   }
   return collectionsService;
@@ -30,10 +31,19 @@ function getCollectionsService() {
 
 function getDatabaseService() {
   if (!databaseService) {
-    const DatabaseService = require('../services/database');
+    const { DatabaseService } = require('../services/database');
     databaseService = new DatabaseService();
   }
   return databaseService;
+}
+
+// ✅ НОВАЯ ФУНКЦИЯ для получения indexing monitor
+function getIndexingMonitor() {
+  if (!indexingMonitor) {
+    const { getIndexingMonitor: createMonitor } = require('../services/indexing-monitor');
+    indexingMonitor = createMonitor();
+  }
+  return indexingMonitor;
 }
 
 // Конфигурация по умолчанию (из reference/config.js)
@@ -198,15 +208,40 @@ router.post('/single', async (req, res) => {
           completedAt: new Date().toISOString(),
           result: result
         };
-        
+
         mintOperations.set(operationId, updatedOperation);
-        
+
+        // ✅ НОВОЕ: Автоматический запуск мониторинга DAS индексации
+        if (result.success && result.assetId) {
+          console.log(`[Mint API] 🔍 Запускаем автоматический мониторинг DAS индексации для ${result.assetId}`);
+          
+          const monitor = getIndexingMonitor();
+          
+          // Запускаем мониторинг с метаданными NFT
+          monitor.startMonitoring(operationId, result.assetId, {
+            treeAddress: collection.treeAddress,
+            leafIndex: result.leafIndex,
+            collection: collection.name,
+            nftName: finalMetadata.name,
+            signature: result.signature,
+            recipient: finalRecipient
+          });
+
+          // Обновляем операцию с информацией о мониторинге
+          updatedOperation.monitoringStarted = true;
+          updatedOperation.monitoringStartedAt = new Date().toISOString();
+          mintOperations.set(operationId, updatedOperation);
+        } else {
+          console.warn(`[Mint API] ⚠️ Мониторинг не запущен: ${!result.success ? 'минт неуспешен' : 'нет assetId'}`);
+        }
+
         // Обновляем в базе данных
         const databaseService = getDatabaseService();
         await databaseService.updateMintOperation(operationId, {
           status: 'completed',
           completedAt: updatedOperation.completedAt,
-          result: result
+          result: result,
+          monitoringStarted: updatedOperation.monitoringStarted || false
         });
         
         console.log(`[Mint API] Операция ${operationId} завершена успешно`);
@@ -582,6 +617,399 @@ router.get('/operations', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Внутренняя ошибка сервера'
+    });
+  }
+});
+
+// GET /api/mint/das-status/:assetId - Проверка DAS индексации NFT
+router.get('/das-status/:assetId', async (req, res) => {
+  try {
+    const { assetId } = req.params;
+    
+    if (!assetId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Asset ID обязателен'
+      });
+    }
+
+    console.log(`[Mint API] Проверка DAS статуса для asset: ${assetId}`);
+    
+    const solanaService = getSolanaService();
+    
+    // Выполняем DAS диагностику
+    const dasStatus = await solanaService.checkDASIndexing(assetId, 3, 2000); // Быстрая проверка
+    
+    // Получаем asset proof
+    const proofStatus = await solanaService.getAssetProofFromDAS(assetId);
+    
+    const response = {
+      success: true,
+      data: {
+        assetId,
+        indexed: dasStatus.indexed,
+        phantomReady: dasStatus.indexed && proofStatus.success,
+        indexingTime: dasStatus.totalTime || null,
+        proofAvailable: proofStatus.success,
+        recommendations: [],
+        timestamp: new Date().toISOString()
+      }
+    };
+    
+    // Добавляем рекомендации
+    if (!dasStatus.indexed) {
+      response.data.recommendations.push('NFT еще индексируется, подождите 15-30 минут');
+      response.data.recommendations.push('Техническая транзакция успешна, но NFT может не отображаться в кошельке');
+    }
+    
+    if (!proofStatus.success && dasStatus.indexed) {
+      response.data.recommendations.push('Asset проиндексирован, но proof недоступен - обратитесь к администратору');
+    }
+    
+    if (dasStatus.indexed && proofStatus.success) {
+      response.data.recommendations.push('NFT полностью готов и должен отображаться в Phantom Wallet');
+    }
+    
+    console.log(`[Mint API] DAS статус для ${assetId}:`, {
+      indexed: response.data.indexed,
+      phantomReady: response.data.phantomReady
+    });
+    
+    res.json(response);
+    
+  } catch (error) {
+    console.error('[Mint API] Ошибка проверки DAS статуса:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Ошибка проверки DAS статуса',
+      details: error.message
+    });
+  }
+});
+
+// POST /api/mint/recheck-indexing - Принудительная перепроверка индексации
+router.post('/recheck-indexing', async (req, res) => {
+  try {
+    const { assetId, operationId } = req.body;
+    
+    if (!assetId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Asset ID обязателен'
+      });
+    }
+
+    console.log(`[Mint API] Принудительная перепроверка индексации для: ${assetId}`);
+    
+    const solanaService = getSolanaService();
+    
+    // Полная диагностика с ожиданием
+    const fullDiagnostics = await solanaService.performCompressedNFTDiagnostics(
+      assetId, 
+      req.body.treeAddress, 
+      req.body.leafIndex
+    );
+    
+    // Если есть operationId, обновляем операцию
+    if (operationId && mintOperations.has(operationId)) {
+      const operation = mintOperations.get(operationId);
+      
+      const updatedOperation = {
+        ...operation,
+        dasStatus: fullDiagnostics,
+        phantomReady: fullDiagnostics.summary?.phantomReady || false,
+        lastChecked: new Date().toISOString()
+      };
+      
+      mintOperations.set(operationId, updatedOperation);
+      
+      // Обновляем в базе данных
+      const databaseService = getDatabaseService();
+      await databaseService.updateMintOperation(operationId, {
+        dasStatus: fullDiagnostics,
+        phantomReady: fullDiagnostics.summary?.phantomReady || false
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        assetId,
+        diagnostics: fullDiagnostics,
+        operationUpdated: !!operationId,
+        timestamp: new Date().toISOString()
+      }
+    });
+    
+  } catch (error) {
+    console.error('[Mint API] Ошибка перепроверки индексации:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Ошибка перепроверки индексации',
+      details: error.message
+    });
+  }
+});
+
+// ✅ НОВЫЕ ENDPOINTS для управления мониторингом
+
+// GET /api/mint/monitoring/stats - Статистика мониторинга
+router.get('/monitoring/stats', async (req, res) => {
+  try {
+    const monitor = getIndexingMonitor();
+    const stats = monitor.getMonitoringStats();
+    
+    res.json({
+      success: true,
+      data: stats
+    });
+    
+  } catch (error) {
+    console.error('[Mint API] Ошибка получения статистики мониторинга:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Ошибка получения статистики мониторинга',
+      details: error.message
+    });
+  }
+});
+
+// GET /api/mint/monitoring/active - Все активные операции мониторинга
+router.get('/monitoring/active', async (req, res) => {
+  try {
+    const monitor = getIndexingMonitor();
+    const activeOperations = monitor.getActiveOperations();
+    
+    res.json({
+      success: true,
+      data: {
+        total: activeOperations.length,
+        operations: activeOperations
+      }
+    });
+    
+  } catch (error) {
+    console.error('[Mint API] Ошибка получения активных операций:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Ошибка получения активных операций',
+      details: error.message
+    });
+  }
+});
+
+// GET /api/mint/monitoring/:operationId - Статус мониторинга конкретной операции
+router.get('/monitoring/:operationId', async (req, res) => {
+  try {
+    const { operationId } = req.params;
+    const monitor = getIndexingMonitor();
+    
+    const status = monitor.getOperationStatus(operationId);
+    
+    if (!status) {
+      return res.status(404).json({
+        success: false,
+        error: 'Операция мониторинга не найдена'
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: status
+    });
+    
+  } catch (error) {
+    console.error('[Mint API] Ошибка получения статуса мониторинга:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Ошибка получения статуса мониторинга',
+      details: error.message
+    });
+  }
+});
+
+// POST /api/mint/monitoring/:operationId/stop - Остановка мониторинга операции
+router.post('/monitoring/:operationId/stop', async (req, res) => {
+  try {
+    const { operationId } = req.params;
+    const { reason = 'manual' } = req.body;
+    
+    const monitor = getIndexingMonitor();
+    const stopped = monitor.stopMonitoring(operationId, reason);
+    
+    if (!stopped) {
+      return res.status(404).json({
+        success: false,
+        error: 'Операция мониторинга не найдена или уже остановлена'
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        operationId,
+        stopped: true,
+        reason
+      }
+    });
+    
+  } catch (error) {
+    console.error('[Mint API] Ошибка остановки мониторинга:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Ошибка остановки мониторинга',
+      details: error.message
+    });
+  }
+});
+
+// ✅ НОВЫЕ WEBHOOK ENDPOINTS
+
+// POST /api/mint/webhooks - Регистрация webhook
+router.post('/webhooks', async (req, res) => {
+  try {
+    const { url, events, headers, secret } = req.body;
+    
+    if (!url) {
+      return res.status(400).json({
+        success: false,
+        error: 'URL webhook обязателен'
+      });
+    }
+
+    const monitor = getIndexingMonitor();
+    const webhookNotifier = monitor.webhookNotifier;
+    
+    if (!webhookNotifier) {
+      return res.status(503).json({
+        success: false,
+        error: 'Webhook система недоступна'
+      });
+    }
+
+    const webhookId = require('crypto').randomUUID();
+    const webhook = webhookNotifier.registerWebhook(webhookId, {
+      url,
+      events: events || ['indexingCompleted', 'indexingTimeout', 'indexingError'],
+      headers: headers || {},
+      secret
+    });
+    
+    res.json({
+      success: true,
+      data: webhook
+    });
+    
+  } catch (error) {
+    console.error('[Mint API] Ошибка регистрации webhook:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Ошибка регистрации webhook',
+      details: error.message
+    });
+  }
+});
+
+// GET /api/mint/webhooks - Список webhooks
+router.get('/webhooks', async (req, res) => {
+  try {
+    const monitor = getIndexingMonitor();
+    const webhookNotifier = monitor.webhookNotifier;
+    
+    if (!webhookNotifier) {
+      return res.status(503).json({
+        success: false,
+        error: 'Webhook система недоступна'
+      });
+    }
+
+    const stats = webhookNotifier.getWebhookStats();
+    
+    res.json({
+      success: true,
+      data: stats
+    });
+    
+  } catch (error) {
+    console.error('[Mint API] Ошибка получения webhooks:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Ошибка получения webhooks',
+      details: error.message
+    });
+  }
+});
+
+// DELETE /api/mint/webhooks/:id - Удаление webhook
+router.delete('/webhooks/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const monitor = getIndexingMonitor();
+    const webhookNotifier = monitor.webhookNotifier;
+    
+    if (!webhookNotifier) {
+      return res.status(503).json({
+        success: false,
+        error: 'Webhook система недоступна'
+      });
+    }
+
+    const removed = webhookNotifier.unregisterWebhook(id);
+    
+    if (!removed) {
+      return res.status(404).json({
+        success: false,
+        error: 'Webhook не найден'
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        id,
+        removed: true
+      }
+    });
+    
+  } catch (error) {
+    console.error('[Mint API] Ошибка удаления webhook:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Ошибка удаления webhook',
+      details: error.message
+    });
+  }
+});
+
+// POST /api/mint/webhooks/:id/test - Тестирование webhook
+router.post('/webhooks/:id/test', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const monitor = getIndexingMonitor();
+    const webhookNotifier = monitor.webhookNotifier;
+    
+    if (!webhookNotifier) {
+      return res.status(503).json({
+        success: false,
+        error: 'Webhook система недоступна'
+      });
+    }
+
+    const result = await webhookNotifier.testWebhook(id);
+    
+    res.json({
+      success: true,
+      data: result
+    });
+    
+  } catch (error) {
+    console.error('[Mint API] Ошибка тестирования webhook:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Ошибка тестирования webhook',
+      details: error.message
     });
   }
 });

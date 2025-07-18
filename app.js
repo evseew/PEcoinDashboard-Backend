@@ -44,6 +44,37 @@ function checkEnvironment() {
 // Выполняем проверку без остановки
 checkEnvironment();
 
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('[App] SIGTERM получен, graceful shutdown...');
+  
+  // ✅ НОВОЕ: Graceful shutdown для indexing monitor
+  try {
+    const { getIndexingMonitor } = require('./src/services/indexing-monitor');
+    const monitor = getIndexingMonitor();
+    monitor.shutdown();
+  } catch (error) {
+    console.warn('[App] Ошибка shutdown indexing monitor:', error.message);
+  }
+  
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('[App] SIGINT получен, graceful shutdown...');
+  
+  // ✅ НОВОЕ: Graceful shutdown для indexing monitor
+  try {
+    const { getIndexingMonitor } = require('./src/services/indexing-monitor');
+    const monitor = getIndexingMonitor();
+    monitor.shutdown();
+  } catch (error) {
+    console.warn('[App] Ошибка shutdown indexing monitor:', error.message);
+  }
+  
+  process.exit(0);
+});
+
 // Import routes (без блокирующих инициализаций)
 const healthRouter = require('./src/routes/health');
 const apiRouter = require('./src/routes/api');

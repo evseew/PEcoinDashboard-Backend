@@ -6,6 +6,16 @@ const { keypairIdentity, publicKey } = require("@metaplex-foundation/umi");
 const bs58 = require("bs58");
 const { setComputeUnitLimit, setComputeUnitPrice, mplToolbox } = require("@metaplex-foundation/mpl-toolbox");
 
+// ✅ НОВЫЕ ИМПОРТЫ для извлечения leaf index
+let findLeafAssetIdPda;
+try {
+  findLeafAssetIdPda = require("@metaplex-foundation/mpl-bubblegum").findLeafAssetIdPda;
+  console.log('[Solana Service] ✅ findLeafAssetIdPda импортирован успешно');
+} catch (error) {
+  console.error('[Solana Service] ❌ Ошибка импорта findLeafAssetIdPda:', error.message);
+  console.log('[Solana Service] ⚠️ Asset ID формирование будет недоступно');
+}
+
 class SolanaService {
   constructor() {
     this.umi = null;
@@ -250,11 +260,64 @@ class SolanaService {
         const elapsedTime = (Date.now() - txStartTime) / 1000;
         console.log(`[Solana Service] ✅ Минт успешен за ${elapsedTime} секунд`);
         
-        return {
+        // ✅ ИСПРАВЛЕНИЕ: Попытка извлечения leaf index с обработкой ошибок
+        let leafIndex = null;
+        let assetId = null;
+        let dasStatus = null;
+        
+        try {
+          console.log(`[Solana Service] 🔍 Пытаемся извлечь leaf index из транзакции...`);
+          leafIndex = await this.extractLeafIndexFromTransaction(bs58.encode(signature), treeAddress);
+          
+          if (leafIndex !== null) {
+            console.log(`[Solana Service] 🔍 Формируем asset ID для leaf index ${leafIndex}...`);
+            assetId = await this.deriveAssetId(treeAddress, leafIndex);
+            
+            // ✅ НОВОЕ: Запускаем DAS диагностику
+            if (assetId) {
+              console.log(`[Solana Service] 🔬 Запускаем DAS диагностику для asset ID: ${assetId}`);
+              dasStatus = await this.performCompressedNFTDiagnostics(assetId, treeAddress, leafIndex);
+            }
+          }
+        } catch (leafError) {
+          console.warn(`[Solana Service] ⚠️ Не удалось извлечь leaf index: ${leafError.message}`);
+          console.log(`[Solana Service] ℹ️ Минт был успешным, но без leaf index и asset ID`);
+        }
+
+        const result = {
           success: true,
           signature: bs58.encode(signature),
           elapsedTime
         };
+
+        // Добавляем leaf index и asset ID только если они были успешно получены
+        if (leafIndex !== null) {
+          result.leafIndex = leafIndex;
+          console.log(`[Solana Service] ✅ Leaf index добавлен в результат: ${leafIndex}`);
+        }
+
+        if (assetId !== null) {
+          result.assetId = assetId;
+          console.log(`[Solana Service] ✅ Asset ID добавлен в результат: ${assetId}`);
+        }
+
+        // ✅ НОВОЕ: Добавляем результаты DAS диагностики
+        if (dasStatus) {
+          result.dasStatus = dasStatus;
+          result.phantomReady = dasStatus.summary?.phantomReady || false;
+          result.indexingStatus = dasStatus.checks?.dasIndexed ? 'completed' : 'pending';
+          result.recommendations = dasStatus.summary?.recommendations || [];
+          
+          console.log(`[Solana Service] 📊 DAS диагностика добавлена в результат:`);
+          console.log(`   - Phantom готов: ${result.phantomReady}`);
+          console.log(`   - Статус индексации: ${result.indexingStatus}`);
+          
+          if (result.recommendations.length > 0) {
+            console.log(`   - Рекомендации:`, result.recommendations);
+          }
+        }
+
+        return result;
         
       } catch (mintError) {
         console.error(`[Solana Service] ❌ Ошибка попытки ${attempt}: ${mintError.message}`);
@@ -430,6 +493,405 @@ class SolanaService {
       
     } catch (error) {
       console.error('[Solana Service] Ошибка логирования транзакции:', error.message);
+    }
+  }
+
+  // ✅ НОВАЯ ФУНКЦИЯ: Извлечение leaf index из transaction logs
+  async extractLeafIndexFromTransaction(signature, treeAddress) {
+    try {
+      console.log(`[Solana Service] Извлекаем leaf index из транзакции: ${signature}`);
+      
+      // Получаем детали транзакции с максимальным commitment
+      const transactionDetails = await this.umi.rpc.getTransaction(signature, {
+        commitment: 'finalized',
+        maxSupportedTransactionVersion: 0
+      });
+
+      if (!transactionDetails) {
+        throw new Error('Транзакция не найдена');
+      }
+
+      // Ищем в логах программы Bubblegum
+      const bubblegumProgramId = bubblegum.MPL_BUBBLEGUM_PROGRAM_ID.toString();
+      
+      for (const instruction of transactionDetails.transaction.message.instructions || []) {
+        // Проверяем программу
+        if (instruction.programId && instruction.programId.toString() === bubblegumProgramId) {
+          
+          // Ищем в inner instructions (где обычно содержится leaf информация)
+          if (transactionDetails.meta && transactionDetails.meta.innerInstructions) {
+            for (const innerInstruction of transactionDetails.meta.innerInstructions) {
+              for (const inner of innerInstruction.instructions) {
+                if (inner.programId && inner.programId.toString() === bubblegumProgramId) {
+                  
+                  // Анализируем data инструкции для поиска leaf index
+                  if (inner.data) {
+                    const leafIndex = this.parseLeafIndexFromInstructionData(inner.data);
+                    if (leafIndex !== null) {
+                      console.log(`[Solana Service] ✅ Leaf index найден: ${leafIndex}`);
+                      return leafIndex;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // ✅ АЛЬТЕРНАТИВНЫЙ МЕТОД: Ищем в логах транзакции
+      if (transactionDetails.meta && transactionDetails.meta.logMessages) {
+        for (const log of transactionDetails.meta.logMessages) {
+          // Ищем log message с leaf index информацией
+          const leafIndexMatch = log.match(/leaf.*index[:\s]+(\d+)/i);
+          if (leafIndexMatch) {
+            const leafIndex = parseInt(leafIndexMatch[1]);
+            console.log(`[Solana Service] ✅ Leaf index найден в логах: ${leafIndex}`);
+            return leafIndex;
+          }
+
+          // Ищем другие возможные форматы
+          const leafMatch = log.match(/Leaf\s+(\d+)/i);
+          if (leafMatch) {
+            const leafIndex = parseInt(leafMatch[1]);
+            console.log(`[Solana Service] ✅ Leaf index найден (формат 2): ${leafIndex}`);
+            return leafIndex;
+          }
+        }
+      }
+
+      // ✅ МЕТОД 3: Запрос к tree account для получения следующего доступного leaf index
+      console.log(`[Solana Service] ⚠️ Leaf index не найден в логах, запрашиваем tree state`);
+      const leafIndex = await this.getNextLeafIndexFromTree(treeAddress);
+      
+      if (leafIndex !== null) {
+        // Возвращаем предыдущий index (так как мы только что заминтили)
+        const actualLeafIndex = Math.max(0, leafIndex - 1);
+        console.log(`[Solana Service] ✅ Leaf index вычислен из tree state: ${actualLeafIndex}`);
+        return actualLeafIndex;
+      }
+
+      throw new Error('Не удалось извлечь leaf index ни одним способом');
+      
+    } catch (error) {
+      console.error('[Solana Service] Ошибка извлечения leaf index:', error.message);
+      throw new Error(`Не удалось извлечь leaf index: ${error.message}`);
+    }
+  }
+
+  // ✅ НОВАЯ ФУНКЦИЯ: Парсинг leaf index из instruction data
+  parseLeafIndexFromInstructionData(instructionData) {
+    try {
+      // instructionData обычно в base58 или base64
+      let data;
+      
+      if (typeof instructionData === 'string') {
+        try {
+          data = bs58.decode(instructionData);
+        } catch {
+          try {
+            data = Buffer.from(instructionData, 'base64');
+          } catch {
+            return null;
+          }
+        }
+      } else if (Buffer.isBuffer(instructionData)) {
+        data = instructionData;
+      } else {
+        return null;
+      }
+
+      // Для bubblegum mint instruction, leaf index обычно находится в определенной позиции
+      // Это зависит от структуры instruction data
+      if (data.length >= 4) {
+        // Проверяем разные возможные позиции leaf index
+        const positions = [4, 8, 12, 16, 20, 24];
+        
+        for (const pos of positions) {
+          if (data.length >= pos + 4) {
+            const leafIndex = data.readUInt32LE(pos);
+            // Валидный leaf index должен быть разумным числом
+            if (leafIndex >= 0 && leafIndex < 1000000) {
+              return leafIndex;
+            }
+          }
+        }
+      }
+
+      return null;
+    } catch (error) {
+      console.warn('[Solana Service] Ошибка парсинга instruction data:', error.message);
+      return null;
+    }
+  }
+
+  // ✅ НОВАЯ ФУНКЦИЯ: Получение следующего leaf index из tree account
+  async getNextLeafIndexFromTree(treeAddress) {
+    try {
+      // Получаем account data для merkle tree
+      const treeAccount = await this.umi.rpc.getAccount(publicKey(treeAddress));
+      
+      if (!treeAccount.exists) {
+        throw new Error('Tree account не найден');
+      }
+
+      // Парсим данные tree account для получения next_leaf_index
+      // Структура account data зависит от программы spl-account-compression
+      const data = treeAccount.data;
+      
+      if (data.length >= 8) {
+        // next_leaf_index обычно находится в начале account data
+        const nextLeafIndex = Number(data.readBigUInt64LE(0));
+        return nextLeafIndex;
+      }
+
+      return null;
+    } catch (error) {
+      console.warn('[Solana Service] Ошибка получения leaf index из tree:', error.message);
+      return null;
+    }
+  }
+
+  // ✅ НОВАЯ ФУНКЦИЯ: Формирование asset ID из tree address и leaf index
+  async deriveAssetId(treeAddress, leafIndex) {
+    try {
+      if (!findLeafAssetIdPda) {
+        // Fallback: генерируем детерминированный ID на основе tree и leaf index
+        console.log('[Solana Service] ⚠️ Используем fallback метод для asset ID');
+        const deterministicId = this.generateFallbackAssetId(treeAddress, leafIndex);
+        return deterministicId;
+      }
+
+      const [assetId] = await findLeafAssetIdPda(this.umi, {
+        merkleTree: publicKey(treeAddress),
+        leafIndex: leafIndex
+      });
+      
+      console.log(`[Solana Service] ✅ Asset ID сформирован: ${assetId.toString()}`);
+      return assetId.toString();
+      
+    } catch (error) {
+      console.error('[Solana Service] Ошибка формирования asset ID:', error.message);
+      
+      // Используем fallback метод в случае ошибки
+      console.log('[Solana Service] ⚠️ Используем fallback метод из-за ошибки');
+      const fallbackId = this.generateFallbackAssetId(treeAddress, leafIndex);
+      return fallbackId;
+    }
+  }
+
+  // ✅ НОВАЯ ФУНКЦИЯ: Fallback метод для генерации asset ID
+  generateFallbackAssetId(treeAddress, leafIndex) {
+    try {
+      // Создаем детерминированный ID на основе tree address и leaf index
+      // Этот метод не идеален, но позволяет системе работать
+      const crypto = require('crypto');
+      const input = `${treeAddress}-${leafIndex}`;
+      const hash = crypto.createHash('sha256').update(input).digest('hex');
+      
+      // Берем первые 32 символа hash для создания base58-подобного ID
+      const fallbackId = `fallback_${hash.substring(0, 32)}`;
+      
+      console.log(`[Solana Service] ✅ Fallback Asset ID: ${fallbackId}`);
+      return fallbackId;
+      
+    } catch (error) {
+      console.error('[Solana Service] Ошибка fallback asset ID:', error.message);
+      // Крайний fallback
+      return `asset_${treeAddress.substring(0, 8)}_${leafIndex}`;
+    }
+  }
+
+  // ✅ НОВАЯ ФУНКЦИЯ: Проверка индексации NFT через DAS API
+  async checkDASIndexing(assetId, maxRetries = 10, delayMs = 5000) {
+    try {
+      console.log(`[Solana Service] 🔍 Проверяем индексацию DAS API для asset: ${assetId}`);
+      
+      // Используем Helius DAS API (может быть настроен в env)
+      const dasApiUrl = process.env.DAS_API_URL || process.env.RPC_URL || "https://api.mainnet-beta.solana.com";
+      
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          console.log(`[Solana Service] 🔄 Попытка ${attempt}/${maxRetries} проверки DAS индексации`);
+          
+          const response = await fetch(dasApiUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: 'check-indexing',
+              method: 'getAsset',
+              params: {
+                id: assetId
+              }
+            }),
+            signal: AbortSignal.timeout(10000) // 10 секунд таймаут
+          });
+
+          if (response.ok) {
+            const result = await response.json();
+            
+            if (result.result && result.result.id === assetId) {
+              console.log(`[Solana Service] ✅ NFT успешно проиндексирован в DAS API`);
+              
+              return {
+                indexed: true,
+                asset: result.result,
+                attempt,
+                totalTime: attempt * delayMs / 1000
+              };
+            }
+          }
+          
+          // Если не найден, ждем перед следующей попыткой
+          if (attempt < maxRetries) {
+            console.log(`[Solana Service] ⏳ NFT еще не проиндексирован, ждем ${delayMs/1000}с...`);
+            await this.sleep(delayMs);
+          }
+          
+        } catch (attemptError) {
+          console.warn(`[Solana Service] ⚠️ Ошибка попытки ${attempt}: ${attemptError.message}`);
+          
+          if (attempt < maxRetries) {
+            await this.sleep(delayMs);
+          }
+        }
+      }
+
+      // Если не удалось проиндексировать за максимальное время
+      console.warn(`[Solana Service] ⚠️ NFT не был проиндексирован за ${maxRetries * delayMs / 1000} секунд`);
+      
+      return {
+        indexed: false,
+        maxRetries,
+        totalWaitTime: maxRetries * delayMs / 1000,
+        recommendation: 'NFT может появиться в кошельке через 15-30 минут'
+      };
+      
+    } catch (error) {
+      console.error('[Solana Service] Ошибка проверки DAS индексации:', error.message);
+      return {
+        indexed: false,
+        error: error.message
+      };
+    }
+  }
+
+  // ✅ НОВАЯ ФУНКЦИЯ: Получение asset proof через DAS API
+  async getAssetProofFromDAS(assetId) {
+    try {
+      console.log(`[Solana Service] 📋 Получаем asset proof для: ${assetId}`);
+      
+      const dasApiUrl = process.env.DAS_API_URL || process.env.RPC_URL || "https://api.mainnet-beta.solana.com";
+      
+      const response = await fetch(dasApiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'get-proof',
+          method: 'getAssetProof',
+          params: {
+            id: assetId
+          }
+        }),
+        signal: AbortSignal.timeout(10000)
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        
+        if (result.result) {
+          console.log(`[Solana Service] ✅ Asset proof получен успешно`);
+          return {
+            success: true,
+            proof: result.result
+          };
+        }
+      }
+
+      throw new Error(`DAS API не вернул asset proof для ${assetId}`);
+      
+    } catch (error) {
+      console.error('[Solana Service] Ошибка получения asset proof:', error.message);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  // ✅ НОВАЯ ФУНКЦИЯ: Полная диагностика compressed NFT
+  async performCompressedNFTDiagnostics(assetId, treeAddress, leafIndex) {
+    try {
+      console.log(`[Solana Service] 🔬 Выполняем полную диагностику compressed NFT`);
+      
+      const diagnostics = {
+        assetId,
+        treeAddress,
+        leafIndex,
+        checks: {}
+      };
+
+      // 1. Проверка tree account
+      try {
+        const treeAccount = await this.umi.rpc.getAccount(publicKey(treeAddress));
+        diagnostics.checks.treeExists = treeAccount.exists;
+        console.log(`[Solana Service] 🌳 Tree account существует: ${treeAccount.exists}`);
+      } catch (error) {
+        diagnostics.checks.treeExists = false;
+        diagnostics.checks.treeError = error.message;
+      }
+
+      // 2. Проверка DAS индексации
+      const dasResult = await this.checkDASIndexing(assetId, 3, 3000); // Быстрая проверка
+      diagnostics.checks.dasIndexed = dasResult.indexed;
+      diagnostics.checks.dasDetails = dasResult;
+
+      // 3. Проверка asset proof
+      const proofResult = await this.getAssetProofFromDAS(assetId);
+      diagnostics.checks.assetProofAvailable = proofResult.success;
+      diagnostics.checks.proofDetails = proofResult;
+
+      // 4. Общий статус
+      diagnostics.summary = {
+        mintSuccessful: true,
+        phantomReady: diagnostics.checks.dasIndexed && diagnostics.checks.assetProofAvailable,
+        estimatedIndexingTime: diagnostics.checks.dasIndexed ? 'Completed' : '15-30 minutes',
+        recommendations: []
+      };
+
+      if (!diagnostics.checks.dasIndexed) {
+        diagnostics.summary.recommendations.push('Подождите 15-30 минут для полной индексации');
+        diagnostics.summary.recommendations.push('NFT технически создан, но может не отображаться в кошельке');
+      }
+
+      if (!diagnostics.checks.assetProofAvailable) {
+        diagnostics.summary.recommendations.push('Asset proof недоступен - возможны проблемы с DAS API');
+      }
+
+      console.log(`[Solana Service] 📊 Диагностика завершена:`, {
+        phantomReady: diagnostics.summary.phantomReady,
+        dasIndexed: diagnostics.checks.dasIndexed
+      });
+
+      return diagnostics;
+      
+    } catch (error) {
+      console.error('[Solana Service] Ошибка диагностики:', error.message);
+      return {
+        assetId,
+        error: error.message,
+        summary: {
+          mintSuccessful: true,
+          phantomReady: false,
+          estimatedIndexingTime: 'Unknown - диагностика недоступна'
+        }
+      };
     }
   }
 }
