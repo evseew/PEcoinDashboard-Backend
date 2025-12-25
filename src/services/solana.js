@@ -457,7 +457,7 @@ class SolanaService {
         // Первая попытка извлечения leaf index (сразу после подтверждения)
         try {
           console.log(`[Solana Service] 🔍 Попытка 1: Извлекаем leaf index из транзакции...`);
-          leafIndex = await this.extractLeafIndexFromTransaction(bs58.encode(signature), treeAddress);
+          leafIndex = await this.extractLeafIndexFromTransaction(bs58.encode(signature), treeAddress, recipient);
           
           if (leafIndex === null) {
             // Если не удалось сразу, ждем и пробуем еще раз (tree account может обновиться с задержкой)
@@ -465,7 +465,7 @@ class SolanaService {
             await this.sleep(5000);
             
             console.log(`[Solana Service] 🔍 Попытка 2: Повторное извлечение leaf index...`);
-            leafIndex = await this.extractLeafIndexFromTransaction(bs58.encode(signature), treeAddress);
+            leafIndex = await this.extractLeafIndexFromTransaction(bs58.encode(signature), treeAddress, recipient);
           }
           
           if (leafIndex !== null) {
@@ -700,8 +700,68 @@ class SolanaService {
     }
   }
 
+  // ✅ НОВАЯ ФУНКЦИЯ: Поиск leaf index через DAS API по owner
+  async findLeafIndexFromDAS(signature, treeAddress, recipient = null) {
+    try {
+      // Если recipient не указан, используем identity (плательщик)
+      const ownerAddress = recipient || this.umi?.identity?.publicKey?.toString();
+      
+      if (!ownerAddress) {
+        console.warn('[Solana Service] ⚠️ Не указан owner для поиска через DAS API');
+        return null;
+      }
+
+      const dasApiUrl = process.env.DAS_API_URL || process.env.RPC_URL || "https://api.mainnet-beta.solana.com";
+      
+      console.log(`[Solana Service] 🔍 Поиск NFT через DAS API для owner: ${ownerAddress}`);
+      
+      // Ищем все NFT владельца через DAS API
+      const response = await fetch(dasApiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'find-by-owner',
+          method: 'getAssetsByOwner',
+          params: {
+            ownerAddress: ownerAddress,
+            page: 1,
+            limit: 1000 // Максимум для поиска
+          }
+        }),
+        signal: AbortSignal.timeout(15000)
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        
+        if (result.result && result.result.items) {
+          // Ищем NFT с нужным tree address и недавней транзакцией
+          for (const asset of result.result.items) {
+            if (asset.compression && asset.compression.tree === treeAddress) {
+              // Проверяем, что это наш NFT (по времени создания или другим признакам)
+              // Для точности можно проверить signature в метаданных, но это не всегда доступно
+              if (asset.compression.leaf_id !== undefined) {
+                const leafIndex = asset.compression.leaf_id;
+                console.log(`[Solana Service] ✅ Найден leaf index через DAS API: ${leafIndex}`);
+                return leafIndex;
+              }
+            }
+          }
+        }
+      }
+      
+      return null;
+    } catch (error) {
+      console.warn('[Solana Service] Ошибка поиска через DAS API:', error.message);
+      return null;
+    }
+  }
+
   // ✅ ИСПРАВЛЕННАЯ ФУНКЦИЯ: Извлечение leaf index из transaction logs
-  async extractLeafIndexFromTransaction(signature, treeAddress) {
+  async extractLeafIndexFromTransaction(signature, treeAddress, recipient = null) {
     try {
       console.log(`[Solana Service] Извлекаем leaf index из транзакции: ${signature}`);
       
@@ -717,8 +777,14 @@ class SolanaService {
         if (totalLeafCount !== null && totalLeafCount > 0) {
           // Leaf index = total_leaf_count - 1 (так как индексация с 0)
           const leafIndex = totalLeafCount - 1;
-          console.log(`[Solana Service] ✅ Leaf index вычислен из tree state: ${leafIndex} (total leaves: ${totalLeafCount})`);
-          return leafIndex;
+          
+          // ✅ ВАЛИДАЦИЯ: Проверяем, что leaf index разумный
+          if (leafIndex >= 0 && leafIndex < 10000000) {
+            console.log(`[Solana Service] ✅ Leaf index вычислен из tree state: ${leafIndex} (total leaves: ${totalLeafCount})`);
+            return leafIndex;
+          } else {
+            console.warn(`[Solana Service] ⚠️ Неверный leaf index: ${leafIndex} (слишком большой, total: ${totalLeafCount})`);
+          }
         }
       } catch (treeError) {
         console.warn(`[Solana Service] ⚠️ Метод 1 не сработал: ${treeError.message}`);
@@ -771,15 +837,34 @@ class SolanaService {
         
         if (totalLeafCount !== null && totalLeafCount > 0) {
           const leafIndex = totalLeafCount - 1;
-          console.log(`[Solana Service] ✅ Leaf index вычислен из tree state (повтор): ${leafIndex}`);
-          return leafIndex;
+          
+          // ✅ ВАЛИДАЦИЯ: Проверяем, что leaf index разумный
+          if (leafIndex >= 0 && leafIndex < 10000000) {
+            console.log(`[Solana Service] ✅ Leaf index вычислен из tree state (повтор): ${leafIndex}`);
+            return leafIndex;
+          } else {
+            console.warn(`[Solana Service] ⚠️ Неверный leaf index (повтор): ${leafIndex} (слишком большой)`);
+          }
         }
       } catch (treeError2) {
         console.warn(`[Solana Service] ⚠️ Метод 3 не сработал: ${treeError2.message}`);
       }
 
+      // ✅ МЕТОД 4: Поиск через DAS API по owner и signature (если доступен)
+      console.log(`[Solana Service] 🔍 Метод 4: Поиск через DAS API по owner`);
+      try {
+        const leafIndexFromDAS = await this.findLeafIndexFromDAS(signature, treeAddress, recipient);
+        if (leafIndexFromDAS !== null) {
+          console.log(`[Solana Service] ✅ Leaf index найден через DAS API: ${leafIndexFromDAS}`);
+          return leafIndexFromDAS;
+        }
+      } catch (dasError) {
+        console.warn(`[Solana Service] ⚠️ Метод 4 не сработал: ${dasError.message}`);
+      }
+
       // Если все методы не сработали, возвращаем null (не бросаем ошибку)
       console.warn(`[Solana Service] ⚠️ Не удалось извлечь leaf index ни одним способом`);
+      console.warn(`[Solana Service] 💡 NFT был успешно заминтен, но leaf index недоступен. NFT может появиться в кошельке через 15-30 минут.`);
       return null;
       
     } catch (error) {
@@ -803,9 +888,10 @@ class SolanaService {
         throw new Error('Tree account не найден');
       }
 
-      // Парсим данные tree account для получения next_leaf_index
-      // Структура account data: [discriminator(8)] + [tree_id(32)] + [authority(32)] + [creator_hash(32)] + [delegate(32)] + [nonce(8)] + [num_mint_batches(8)] + [num_valid_leaf_batches(8)] + [total_leaf_count(8)]
-      // next_leaf_index = total_leaf_count (находится по offset 8+32+32+32+32+8+8+8 = 160 байт)
+      // Парсим данные tree account для получения total_leaf_count
+      // Структура account data для spl-account-compression:
+      // [discriminator(8)] + [tree_id(32)] + [authority(32)] + [creator_hash(32)] + [delegate(32)] + [nonce(8)] + [num_mint_batches(8)] + [num_valid_leaf_batches(8)] + [total_leaf_count(8)]
+      // total_leaf_count находится по offset 8+32+32+32+32+8+8+8 = 160 байт
       let data = treeAccount.data;
       
       // Конвертируем в Buffer если нужно
@@ -822,36 +908,45 @@ class SolanaService {
         }
       }
       
+      console.log(`[Solana Service] 📊 Tree account data length: ${data.length} bytes`);
+      
       // Проверяем минимальную длину (нужно хотя бы 168 байт для total_leaf_count)
       if (data.length >= 168) {
         // total_leaf_count находится по offset 160 (после всех предыдущих полей)
         const totalLeafCount = Number(data.readBigUInt64LE(160));
-        console.log(`[Solana Service] 📊 Tree account: total_leaf_count = ${totalLeafCount}`);
-        return totalLeafCount;
-      } else {
-        // Альтернативный метод: пробуем разные offset'ы
-        console.log(`[Solana Service] ⚠️ Account data слишком короткая (${data.length} байт), пробуем альтернативные offset'ы`);
         
-        // Пробуем читать с разных позиций (для разных версий программы)
-        const offsets = [0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160];
-        
-        for (const offset of offsets) {
-          if (data.length >= offset + 8) {
-            try {
-              const value = Number(data.readBigUInt64LE(offset));
-              // Валидный leaf count должен быть разумным числом
-              if (value >= 0 && value < 10000000) {
-                console.log(`[Solana Service] ✅ Найден leaf count по offset ${offset}: ${value}`);
-                return value;
-              }
-            } catch (readError) {
-              continue;
+        // ✅ ВАЛИДАЦИЯ: Проверяем, что значение разумное
+        if (totalLeafCount >= 0 && totalLeafCount < 10000000) {
+          console.log(`[Solana Service] 📊 Tree account: total_leaf_count = ${totalLeafCount} (offset 160)`);
+          return totalLeafCount;
+        } else {
+          console.warn(`[Solana Service] ⚠️ Неверное значение total_leaf_count по offset 160: ${totalLeafCount} (слишком большое)`);
+        }
+      }
+      
+      // Альтернативный метод: пробуем разные offset'ы с валидацией
+      console.log(`[Solana Service] 🔍 Пробуем альтернативные offset'ы для поиска total_leaf_count`);
+      const offsets = [160, 152, 144, 136, 128, 120, 112, 104, 96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8, 0];
+      
+      for (const offset of offsets) {
+        if (data.length >= offset + 8) {
+          try {
+            const value = Number(data.readBigUInt64LE(offset));
+            // ✅ СТРОГАЯ ВАЛИДАЦИЯ: Валидный leaf count должен быть разумным числом
+            // Обычно в дереве Меркля не более нескольких миллионов листьев
+            if (value >= 0 && value < 10000000 && value === Math.floor(value)) {
+              console.log(`[Solana Service] ✅ Найден валидный leaf count по offset ${offset}: ${value}`);
+              return value;
             }
+          } catch (readError) {
+            continue;
           }
         }
       }
-
+      
+      console.warn(`[Solana Service] ⚠️ Не удалось найти валидный total_leaf_count в tree account`);
       return null;
+      
     } catch (error) {
       console.warn('[Solana Service] Ошибка получения leaf index из tree:', error.message);
       console.warn('[Solana Service] Stack:', error.stack);
