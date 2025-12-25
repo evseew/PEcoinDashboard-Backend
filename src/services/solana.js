@@ -771,12 +771,12 @@ class SolanaService {
   // ✅ НОВАЯ ФУНКЦИЯ: Парсинг leaf index из instruction data
   parseLeafIndexFromInstructionData(instructionData) {
     try {
-      // instructionData обычно в base58 или base64
+      // instructionData обычно в base58 или base64, или уже Buffer/Uint8Array
       let data;
       
       if (typeof instructionData === 'string') {
         try {
-          data = bs58.decode(instructionData);
+          data = Buffer.from(bs58.decode(instructionData));
         } catch {
           try {
             data = Buffer.from(instructionData, 'base64');
@@ -786,22 +786,33 @@ class SolanaService {
         }
       } else if (Buffer.isBuffer(instructionData)) {
         data = instructionData;
+      } else if (instructionData instanceof Uint8Array) {
+        // Конвертируем Uint8Array в Buffer
+        data = Buffer.from(instructionData);
+      } else if (Array.isArray(instructionData)) {
+        // Если это массив чисел
+        data = Buffer.from(instructionData);
       } else {
         return null;
       }
 
       // Для bubblegum mint instruction, leaf index обычно находится в определенной позиции
       // Это зависит от структуры instruction data
-      if (data.length >= 4) {
+      if (data && data.length >= 4) {
         // Проверяем разные возможные позиции leaf index
         const positions = [4, 8, 12, 16, 20, 24];
         
         for (const pos of positions) {
           if (data.length >= pos + 4) {
-            const leafIndex = data.readUInt32LE(pos);
-            // Валидный leaf index должен быть разумным числом
-            if (leafIndex >= 0 && leafIndex < 1000000) {
-              return leafIndex;
+            try {
+              const leafIndex = data.readUInt32LE(pos);
+              // Валидный leaf index должен быть разумным числом
+              if (leafIndex >= 0 && leafIndex < 1000000) {
+                return leafIndex;
+              }
+            } catch (readError) {
+              // Продолжаем проверку других позиций
+              continue;
             }
           }
         }
