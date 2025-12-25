@@ -449,14 +449,24 @@ class SolanaService {
         const elapsedTime = (Date.now() - txStartTime) / 1000;
         console.log(`[Solana Service] ✅ Минт успешен за ${elapsedTime} секунд`);
         
-        // ✅ ИСПРАВЛЕНИЕ: Попытка извлечения leaf index с обработкой ошибок
+        // ✅ ИСПРАВЛЕНИЕ: Попытка извлечения leaf index с обработкой ошибок и повторными попытками
         let leafIndex = null;
         let assetId = null;
         let dasStatus = null;
         
+        // Первая попытка извлечения leaf index (сразу после подтверждения)
         try {
-          console.log(`[Solana Service] 🔍 Пытаемся извлечь leaf index из транзакции...`);
+          console.log(`[Solana Service] 🔍 Попытка 1: Извлекаем leaf index из транзакции...`);
           leafIndex = await this.extractLeafIndexFromTransaction(bs58.encode(signature), treeAddress);
+          
+          if (leafIndex === null) {
+            // Если не удалось сразу, ждем и пробуем еще раз (tree account может обновиться с задержкой)
+            console.log(`[Solana Service] ⏳ Ждем 5 секунд для обновления tree account...`);
+            await this.sleep(5000);
+            
+            console.log(`[Solana Service] 🔍 Попытка 2: Повторное извлечение leaf index...`);
+            leafIndex = await this.extractLeafIndexFromTransaction(bs58.encode(signature), treeAddress);
+          }
           
           if (leafIndex !== null) {
             console.log(`[Solana Service] 🔍 Формируем asset ID для leaf index ${leafIndex}...`);
@@ -467,10 +477,15 @@ class SolanaService {
               console.log(`[Solana Service] 🔬 Запускаем DAS диагностику для asset ID: ${assetId}`);
               dasStatus = await this.performCompressedNFTDiagnostics(assetId, treeAddress, leafIndex);
             }
+          } else {
+            console.warn(`[Solana Service] ⚠️ Не удалось извлечь leaf index после двух попыток`);
+            console.log(`[Solana Service] ℹ️ NFT был успешно заминчен, но asset ID недоступен`);
+            console.log(`[Solana Service] 💡 Рекомендация: Проверьте NFT через DAS API через 15-30 минут после минтинга`);
           }
         } catch (leafError) {
-          console.warn(`[Solana Service] ⚠️ Не удалось извлечь leaf index: ${leafError.message}`);
+          console.warn(`[Solana Service] ⚠️ Ошибка при извлечении leaf index: ${leafError.message}`);
           console.log(`[Solana Service] ℹ️ Минт был успешным, но без leaf index и asset ID`);
+          console.log(`[Solana Service] 💡 Рекомендация: NFT может появиться в кошельке через 15-30 минут`);
         }
 
         const result = {
@@ -685,147 +700,100 @@ class SolanaService {
     }
   }
 
-  // ✅ НОВАЯ ФУНКЦИЯ: Извлечение leaf index из transaction logs
+  // ✅ ИСПРАВЛЕННАЯ ФУНКЦИЯ: Извлечение leaf index из transaction logs
   async extractLeafIndexFromTransaction(signature, treeAddress) {
     try {
       console.log(`[Solana Service] Извлекаем leaf index из транзакции: ${signature}`);
       
-      // Получаем детали транзакции с максимальным commitment
-      const transactionDetails = await this.umi.rpc.getTransaction(signature, {
-        commitment: 'finalized',
-        maxSupportedTransactionVersion: 0
-      });
-
-      if (!transactionDetails) {
-        throw new Error('Транзакция не найдена');
+      // ✅ МЕТОД 1: Запрос к tree account ДО попыток парсинга транзакции
+      // Это самый надежный способ - получаем текущее количество листьев после минтинга
+      console.log(`[Solana Service] 🔍 Метод 1: Запрашиваем tree state для получения leaf count`);
+      try {
+        // Ждем немного, чтобы tree account обновился
+        await this.sleep(2000);
+        
+        const totalLeafCount = await this.getNextLeafIndexFromTree(treeAddress);
+        
+        if (totalLeafCount !== null && totalLeafCount > 0) {
+          // Leaf index = total_leaf_count - 1 (так как индексация с 0)
+          const leafIndex = totalLeafCount - 1;
+          console.log(`[Solana Service] ✅ Leaf index вычислен из tree state: ${leafIndex} (total leaves: ${totalLeafCount})`);
+          return leafIndex;
+        }
+      } catch (treeError) {
+        console.warn(`[Solana Service] ⚠️ Метод 1 не сработал: ${treeError.message}`);
       }
 
-      // Ищем в логах программы Bubblegum
-      const bubblegumProgramId = bubblegum.MPL_BUBBLEGUM_PROGRAM_ID.toString();
-      
-      for (const instruction of transactionDetails.transaction.message.instructions || []) {
-        // Проверяем программу
-        if (instruction.programId && instruction.programId.toString() === bubblegumProgramId) {
+      // ✅ МЕТОД 2: Парсинг логов транзакции
+      console.log(`[Solana Service] 🔍 Метод 2: Парсим логи транзакции`);
+      try {
+        const transactionDetails = await this.umi.rpc.getTransaction(signature, {
+          commitment: 'finalized',
+          maxSupportedTransactionVersion: 0
+        });
+
+        if (transactionDetails && transactionDetails.meta && transactionDetails.meta.logMessages) {
+          // Ищем в логах программы Bubblegum
+          const bubblegumProgramId = bubblegum.MPL_BUBBLEGUM_PROGRAM_ID.toString();
           
-          // Ищем в inner instructions (где обычно содержится leaf информация)
-          if (transactionDetails.meta && transactionDetails.meta.innerInstructions) {
-            for (const innerInstruction of transactionDetails.meta.innerInstructions) {
-              for (const inner of innerInstruction.instructions) {
-                if (inner.programId && inner.programId.toString() === bubblegumProgramId) {
-                  
-                  // Анализируем data инструкции для поиска leaf index
-                  if (inner.data) {
-                    const leafIndex = this.parseLeafIndexFromInstructionData(inner.data);
-                    if (leafIndex !== null) {
-                      console.log(`[Solana Service] ✅ Leaf index найден: ${leafIndex}`);
-                      return leafIndex;
-                    }
-                  }
+          for (const log of transactionDetails.meta.logMessages) {
+            // Ищем различные форматы логов с leaf index
+            const patterns = [
+              /leaf.*index[:\s]+(\d+)/i,
+              /Leaf\s+(\d+)/i,
+              /leaf_index[:\s]+(\d+)/i,
+              /leafIndex[:\s]+(\d+)/i,
+              /index[:\s]+(\d+).*leaf/i
+            ];
+            
+            for (const pattern of patterns) {
+              const match = log.match(pattern);
+              if (match) {
+                const leafIndex = parseInt(match[1]);
+                if (leafIndex >= 0) {
+                  console.log(`[Solana Service] ✅ Leaf index найден в логах: ${leafIndex}`);
+                  return leafIndex;
                 }
               }
             }
           }
         }
+      } catch (logError) {
+        console.warn(`[Solana Service] ⚠️ Метод 2 не сработал: ${logError.message}`);
       }
 
-      // ✅ АЛЬТЕРНАТИВНЫЙ МЕТОД: Ищем в логах транзакции
-      if (transactionDetails.meta && transactionDetails.meta.logMessages) {
-        for (const log of transactionDetails.meta.logMessages) {
-          // Ищем log message с leaf index информацией
-          const leafIndexMatch = log.match(/leaf.*index[:\s]+(\d+)/i);
-          if (leafIndexMatch) {
-            const leafIndex = parseInt(leafIndexMatch[1]);
-            console.log(`[Solana Service] ✅ Leaf index найден в логах: ${leafIndex}`);
-            return leafIndex;
-          }
-
-          // Ищем другие возможные форматы
-          const leafMatch = log.match(/Leaf\s+(\d+)/i);
-          if (leafMatch) {
-            const leafIndex = parseInt(leafMatch[1]);
-            console.log(`[Solana Service] ✅ Leaf index найден (формат 2): ${leafIndex}`);
-            return leafIndex;
-          }
+      // ✅ МЕТОД 3: Альтернативный запрос к tree account (повторная попытка)
+      console.log(`[Solana Service] 🔍 Метод 3: Повторный запрос к tree state`);
+      try {
+        await this.sleep(3000); // Ждем еще немного
+        
+        const totalLeafCount = await this.getNextLeafIndexFromTree(treeAddress);
+        
+        if (totalLeafCount !== null && totalLeafCount > 0) {
+          const leafIndex = totalLeafCount - 1;
+          console.log(`[Solana Service] ✅ Leaf index вычислен из tree state (повтор): ${leafIndex}`);
+          return leafIndex;
         }
+      } catch (treeError2) {
+        console.warn(`[Solana Service] ⚠️ Метод 3 не сработал: ${treeError2.message}`);
       }
 
-      // ✅ МЕТОД 3: Запрос к tree account для получения следующего доступного leaf index
-      console.log(`[Solana Service] ⚠️ Leaf index не найден в логах, запрашиваем tree state`);
-      const leafIndex = await this.getNextLeafIndexFromTree(treeAddress);
-      
-      if (leafIndex !== null) {
-        // Возвращаем предыдущий index (так как мы только что заминтили)
-        const actualLeafIndex = Math.max(0, leafIndex - 1);
-        console.log(`[Solana Service] ✅ Leaf index вычислен из tree state: ${actualLeafIndex}`);
-        return actualLeafIndex;
-      }
-
-      throw new Error('Не удалось извлечь leaf index ни одним способом');
+      // Если все методы не сработали, возвращаем null (не бросаем ошибку)
+      console.warn(`[Solana Service] ⚠️ Не удалось извлечь leaf index ни одним способом`);
+      return null;
       
     } catch (error) {
       console.error('[Solana Service] Ошибка извлечения leaf index:', error.message);
-      throw new Error(`Не удалось извлечь leaf index: ${error.message}`);
-    }
-  }
-
-  // ✅ НОВАЯ ФУНКЦИЯ: Парсинг leaf index из instruction data
-  parseLeafIndexFromInstructionData(instructionData) {
-    try {
-      // instructionData обычно в base58 или base64, или уже Buffer/Uint8Array
-      let data;
-      
-      if (typeof instructionData === 'string') {
-        try {
-          data = Buffer.from(bs58.decode(instructionData));
-        } catch {
-          try {
-            data = Buffer.from(instructionData, 'base64');
-          } catch {
-            return null;
-          }
-        }
-      } else if (Buffer.isBuffer(instructionData)) {
-        data = instructionData;
-      } else if (instructionData instanceof Uint8Array) {
-        // Конвертируем Uint8Array в Buffer
-        data = Buffer.from(instructionData);
-      } else if (Array.isArray(instructionData)) {
-        // Если это массив чисел
-        data = Buffer.from(instructionData);
-      } else {
-        return null;
-      }
-
-      // Для bubblegum mint instruction, leaf index обычно находится в определенной позиции
-      // Это зависит от структуры instruction data
-      if (data && data.length >= 4) {
-        // Проверяем разные возможные позиции leaf index
-        const positions = [4, 8, 12, 16, 20, 24];
-        
-        for (const pos of positions) {
-          if (data.length >= pos + 4) {
-            try {
-              const leafIndex = data.readUInt32LE(pos);
-              // Валидный leaf index должен быть разумным числом
-              if (leafIndex >= 0 && leafIndex < 1000000) {
-                return leafIndex;
-              }
-            } catch (readError) {
-              // Продолжаем проверку других позиций
-              continue;
-            }
-          }
-        }
-      }
-
-      return null;
-    } catch (error) {
-      console.warn('[Solana Service] Ошибка парсинга instruction data:', error.message);
+      console.error('[Solana Service] Stack:', error.stack);
+      // Не бросаем ошибку, возвращаем null - минтинг был успешным
       return null;
     }
   }
 
-  // ✅ НОВАЯ ФУНКЦИЯ: Получение следующего leaf index из tree account
+  // ✅ УДАЛЕНА: parseLeafIndexFromInstructionData больше не используется
+  // Используем более надежный метод через tree account state
+
+  // ✅ ИСПРАВЛЕННАЯ ФУНКЦИЯ: Получение следующего leaf index из tree account
   async getNextLeafIndexFromTree(treeAddress) {
     try {
       // Получаем account data для merkle tree
@@ -836,18 +804,57 @@ class SolanaService {
       }
 
       // Парсим данные tree account для получения next_leaf_index
-      // Структура account data зависит от программы spl-account-compression
-      const data = treeAccount.data;
+      // Структура account data: [discriminator(8)] + [tree_id(32)] + [authority(32)] + [creator_hash(32)] + [delegate(32)] + [nonce(8)] + [num_mint_batches(8)] + [num_valid_leaf_batches(8)] + [total_leaf_count(8)]
+      // next_leaf_index = total_leaf_count (находится по offset 8+32+32+32+32+8+8+8 = 160 байт)
+      let data = treeAccount.data;
       
-      if (data.length >= 8) {
-        // next_leaf_index обычно находится в начале account data
-        const nextLeafIndex = Number(data.readBigUInt64LE(0));
-        return nextLeafIndex;
+      // Конвертируем в Buffer если нужно
+      if (!Buffer.isBuffer(data)) {
+        if (data instanceof Uint8Array) {
+          data = Buffer.from(data);
+        } else if (typeof data === 'string') {
+          data = Buffer.from(data, 'base64');
+        } else if (Array.isArray(data)) {
+          data = Buffer.from(data);
+        } else {
+          console.warn('[Solana Service] Неизвестный тип account data:', typeof data);
+          return null;
+        }
+      }
+      
+      // Проверяем минимальную длину (нужно хотя бы 168 байт для total_leaf_count)
+      if (data.length >= 168) {
+        // total_leaf_count находится по offset 160 (после всех предыдущих полей)
+        const totalLeafCount = Number(data.readBigUInt64LE(160));
+        console.log(`[Solana Service] 📊 Tree account: total_leaf_count = ${totalLeafCount}`);
+        return totalLeafCount;
+      } else {
+        // Альтернативный метод: пробуем разные offset'ы
+        console.log(`[Solana Service] ⚠️ Account data слишком короткая (${data.length} байт), пробуем альтернативные offset'ы`);
+        
+        // Пробуем читать с разных позиций (для разных версий программы)
+        const offsets = [0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160];
+        
+        for (const offset of offsets) {
+          if (data.length >= offset + 8) {
+            try {
+              const value = Number(data.readBigUInt64LE(offset));
+              // Валидный leaf count должен быть разумным числом
+              if (value >= 0 && value < 10000000) {
+                console.log(`[Solana Service] ✅ Найден leaf count по offset ${offset}: ${value}`);
+                return value;
+              }
+            } catch (readError) {
+              continue;
+            }
+          }
+        }
       }
 
       return null;
     } catch (error) {
       console.warn('[Solana Service] Ошибка получения leaf index из tree:', error.message);
+      console.warn('[Solana Service] Stack:', error.stack);
       return null;
     }
   }
