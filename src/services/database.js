@@ -220,7 +220,8 @@ class DatabaseService {
   // Логирование событий
   async logEvent(event) {
     try {
-      if (!this.isConnected) {
+      // Проверяем подключение и наличие клиента
+      if (!this.isConnected || !this.supabase) {
         return this.mockLogEvent(event);
       }
 
@@ -243,7 +244,12 @@ class DatabaseService {
       return { success: true, data };
       
     } catch (error) {
-      console.error('[Database Service] Исключение при логировании:', error);
+      // Тихая обработка ошибок логирования - не должны ломать основную функциональность
+      console.error('[Database Service] Ошибка логирования:', {
+        message: error.message,
+        details: error.stack?.split('\n')[0],
+        hint: 'Логирование в БД недоступно, используется memory-режим'
+      });
       return this.mockLogEvent(event);
     }
   }

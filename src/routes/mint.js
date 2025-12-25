@@ -31,8 +31,22 @@ function getCollectionsService() {
 
 function getDatabaseService() {
   if (!databaseService) {
-    const { DatabaseService } = require('../services/database');
-    databaseService = new DatabaseService();
+    try {
+      const DatabaseServiceModule = require('../services/database');
+      // Проверяем, что это класс или функция-конструктор
+      if (typeof DatabaseServiceModule === 'function') {
+        databaseService = new DatabaseServiceModule();
+      } else if (DatabaseServiceModule.default && typeof DatabaseServiceModule.default === 'function') {
+        // Поддержка ES6 экспорта
+        databaseService = new DatabaseServiceModule.default();
+      } else {
+        console.warn('[Mint API] DatabaseService не является конструктором, используем fallback');
+        databaseService = null; // Будем использовать fallback на память
+      }
+    } catch (error) {
+      console.error('[Mint API] Ошибка инициализации DatabaseService:', error.message);
+      databaseService = null; // Fallback на память
+    }
   }
   return databaseService;
 }
@@ -138,9 +152,15 @@ router.post('/single', async (req, res) => {
     
     mintOperations.set(operationId, operationData);
     
-    // Сохраняем в базу данных для персистентности
+    // Сохраняем в базу данных для персистентности (если доступна)
     const databaseService = getDatabaseService();
-    await databaseService.saveMintOperation(operationData);
+    if (databaseService && typeof databaseService.saveMintOperation === 'function') {
+      try {
+        await databaseService.saveMintOperation(operationData);
+      } catch (dbError) {
+        console.warn('[Mint API] Не удалось сохранить операцию в БД, продолжаем в памяти:', dbError.message);
+      }
+    }
     
     // Немедленно возвращаем ID операции (асинхронный процесс)
     res.json({
@@ -159,21 +179,14 @@ router.post('/single', async (req, res) => {
       try {
         const operation = mintOperations.get(operationId);
         
-        // Собираем метаданные с учетом настроек коллекции
+        // Собираем метаданные с учетом настроек коллекции (creators будут добавлены в Solana Service)
         const finalMetadata = {
           ...metadata,
           symbol: metadata.symbol || collection.symbol || 'cNFT',
           sellerFeeBasisPoints: metadata.sellerFeeBasisPoints !== undefined 
             ? metadata.sellerFeeBasisPoints 
-            : (collection.sellerFeeBasisPoints || 0),
-          // 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: используем creators из коллекции если не переданы
-          creators: metadata.creators || metadata.properties?.creators || [
-            {
-              address: collection.creatorAddress || process.env.DEFAULT_CREATOR_ADDRESS || process.env.DEFAULT_RECIPIENT,
-              share: 100,
-              verified: true
-            }
-          ]
+            : (collection.sellerFeeBasisPoints || 0)
+          // ✅ АРХИТЕКТУРНОЕ ИСПРАВЛЕНИЕ: creators убраны отсюда - будут добавлены в Solana Service после инициализации
         };
         
         console.log('[Mint API] 🔍 ДИАГНОСТИКА метаданных:', {
@@ -235,14 +248,20 @@ router.post('/single', async (req, res) => {
           console.warn(`[Mint API] ⚠️ Мониторинг не запущен: ${!result.success ? 'минт неуспешен' : 'нет assetId'}`);
         }
 
-        // Обновляем в базе данных
+        // Обновляем в базе данных (если доступна)
         const databaseService = getDatabaseService();
-        await databaseService.updateMintOperation(operationId, {
-          status: 'completed',
-          completedAt: updatedOperation.completedAt,
-          result: result,
-          monitoringStarted: updatedOperation.monitoringStarted || false
-        });
+        if (databaseService && typeof databaseService.updateMintOperation === 'function') {
+          try {
+            await databaseService.updateMintOperation(operationId, {
+              status: 'completed',
+              completedAt: updatedOperation.completedAt,
+              result: result,
+              monitoringStarted: updatedOperation.monitoringStarted || false
+            });
+          } catch (dbError) {
+            console.warn('[Mint API] Не удалось обновить операцию в БД:', dbError.message);
+          }
+        }
         
         console.log(`[Mint API] Операция ${operationId} завершена успешно`);
         
@@ -259,13 +278,19 @@ router.post('/single', async (req, res) => {
         
         mintOperations.set(operationId, failedOperation);
         
-        // Обновляем в базе данных
+        // Обновляем в базе данных (если доступна)
         const databaseService = getDatabaseService();
-        await databaseService.updateMintOperation(operationId, {
-          status: 'failed',
-          completedAt: failedOperation.completedAt,
-          error: error.message
-        });
+        if (databaseService && typeof databaseService.updateMintOperation === 'function') {
+          try {
+            await databaseService.updateMintOperation(operationId, {
+              status: 'failed',
+              completedAt: failedOperation.completedAt,
+              error: error.message
+            });
+          } catch (dbError) {
+            console.warn('[Mint API] Не удалось обновить операцию в БД:', dbError.message);
+          }
+        }
       }
     });
     
@@ -395,21 +420,14 @@ router.post('/batch', async (req, res) => {
         try {
           console.log(`[Mint API] Пакет ${operationId}: обработка элемента ${i + 1}/${items.length}`);
           
-          // Собираем метаданные с учетом настроек коллекции
+          // Собираем метаданные с учетом настроек коллекции (creators будут добавлены в Solana Service)
           const finalMetadata = {
             ...item.metadata,
             symbol: item.metadata.symbol || collection.symbol,
             sellerFeeBasisPoints: item.metadata.sellerFeeBasisPoints !== undefined 
               ? item.metadata.sellerFeeBasisPoints 
-              : collection.metadata.sellerFeeBasisPoints,
-            // 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: используем creators из коллекции если не переданы
-            creators: item.metadata.creators || item.metadata.properties?.creators || [
-              {
-                address: process.env.DEFAULT_CREATOR_ADDRESS || process.env.DEFAULT_RECIPIENT,
-                share: 100,
-                verified: true
-              }
-            ]
+              : collection.metadata.sellerFeeBasisPoints
+            // ✅ АРХИТЕКТУРНОЕ ИСПРАВЛЕНИЕ: creators убраны - Solana Service сам определяет их после инициализации
           };
           
           const result = await solanaService.mintSingleNFT({
@@ -538,13 +556,22 @@ router.get('/operations', async (req, res) => {
     
     const databaseService = getDatabaseService();
     
-    // Пытаемся получить данные из базы данных
-    const dbResult = await databaseService.getMintOperations({
-      status,
-      type,
-      collectionId,
-      limit: parseInt(limit)
-    });
+    let dbResult = { success: false, data: [] };
+    
+    // Пытаемся получить данные из базы данных только если сервис доступен
+    if (databaseService && typeof databaseService.getMintOperations === 'function') {
+      try {
+        dbResult = await databaseService.getMintOperations({
+          status,
+          type,
+          collectionId,
+          limit: parseInt(limit)
+        });
+      } catch (dbError) {
+        console.warn('[Mint API] Ошибка получения данных из БД, используем память:', dbError.message);
+        dbResult = { success: false, data: [] };
+      }
+    }
     
     let operations = [];
     let total = 0;
@@ -723,12 +750,18 @@ router.post('/recheck-indexing', async (req, res) => {
       
       mintOperations.set(operationId, updatedOperation);
       
-      // Обновляем в базе данных
+      // Обновляем в базе данных (если доступна)
       const databaseService = getDatabaseService();
-      await databaseService.updateMintOperation(operationId, {
-        dasStatus: fullDiagnostics,
-        phantomReady: fullDiagnostics.summary?.phantomReady || false
-      });
+      if (databaseService && typeof databaseService.updateMintOperation === 'function') {
+        try {
+          await databaseService.updateMintOperation(operationId, {
+            dasStatus: fullDiagnostics,
+            phantomReady: fullDiagnostics.summary?.phantomReady || false
+          });
+        } catch (dbError) {
+          console.warn('[Mint API] Не удалось обновить операцию в БД:', dbError.message);
+        }
+      }
     }
     
     res.json({

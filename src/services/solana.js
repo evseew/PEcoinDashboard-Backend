@@ -894,6 +894,8 @@ class SolanaService {
       };
     }
   }
+
+  // ✅ МЕТОД УДАЛЕН: больше не нужен, creators определяются автоматически внутри mintSingleNFT
 }
 
 module.exports = SolanaService; 
