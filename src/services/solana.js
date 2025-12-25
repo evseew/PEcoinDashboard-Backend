@@ -6,6 +6,16 @@ const { keypairIdentity, publicKey } = require("@metaplex-foundation/umi");
 const bs58 = require("bs58");
 const { setComputeUnitLimit, setComputeUnitPrice, mplToolbox } = require("@metaplex-foundation/mpl-toolbox");
 
+// ✅ ИМПОРТ для верификации creator в коллекции
+let tokenMetadata;
+try {
+  tokenMetadata = require("@metaplex-foundation/mpl-token-metadata");
+  console.log('[Solana Service] ✅ mplTokenMetadata импортирован успешно');
+} catch (error) {
+  console.error('[Solana Service] ❌ Ошибка импорта mplTokenMetadata:', error.message);
+  console.log('[Solana Service] ⚠️ Верификация creator будет недоступна');
+}
+
 // ✅ НОВЫЕ ИМПОРТЫ для извлечения leaf index
 let findLeafAssetIdPda;
 try {
@@ -60,6 +70,13 @@ class SolanaService {
     // Подключение Bubblegum и Toolbox (из reference)
     umi.use(bubblegum.mplBubblegum());
     umi.use(mplToolbox());
+    
+    // ✅ Подключение Token Metadata для верификации creator
+    if (tokenMetadata) {
+      umi.use(tokenMetadata.mplTokenMetadata());
+      console.log("[Solana Service] Token Metadata подключен");
+    }
+    
     console.log("[Solana Service] Bubblegum и mplToolbox подключены");
 
     this.umiInstanceCache[url] = umi;
@@ -142,6 +159,141 @@ class SolanaService {
     return this.initialized && this.umi !== null;
   }
   
+  // ✅ НОВАЯ ФУНКЦИЯ: Проверка статуса верификации creator в коллекции
+  async checkCreatorVerificationStatus(collectionAddress, creatorAddress) {
+    try {
+      if (!tokenMetadata) {
+        console.warn('[Solana Service] ⚠️ Token Metadata недоступен, пропускаем проверку верификации');
+        return { verified: false, canVerify: false };
+      }
+      
+      const collectionPubkey = publicKey(collectionAddress);
+      const creatorPubkey = publicKey(creatorAddress);
+      
+      // Получаем метаданные коллекции через UMI (после подключения tokenMetadata)
+      const [metadataPda] = tokenMetadata.findMetadataPda(this.umi, {
+        mint: collectionPubkey
+      });
+      
+      try {
+        const metadataAccount = await this.umi.rpc.getAccount(metadataPda);
+        
+        if (!metadataAccount.exists) {
+          console.warn(`[Solana Service] ⚠️ Метаданные коллекции не найдены: ${collectionAddress}`);
+          return { verified: false, canVerify: false, error: 'Metadata not found' };
+        }
+        
+        // Парсим метаданные через UMI
+        const metadata = tokenMetadata.deserializeMetadata(this.umi, metadataAccount);
+        
+        // Проверяем, есть ли creator в списке creators коллекции
+        const creator = metadata.creators?.find(c => {
+          const creatorAddr = typeof c.address === 'string' ? c.address : c.address.toString();
+          const targetAddr = typeof creatorPubkey === 'string' ? creatorPubkey : creatorPubkey.toString();
+          return creatorAddr === targetAddr;
+        });
+        
+        if (!creator) {
+          console.warn(`[Solana Service] ⚠️ Creator ${creatorAddress} не найден в метаданных коллекции`);
+          return { verified: false, canVerify: false, error: 'Creator not found in collection' };
+        }
+        
+        const isVerified = creator.verified;
+        console.log(`[Solana Service] 🔍 Статус верификации creator ${creatorAddress}: ${isVerified ? '✅ верифицирован' : '❌ не верифицирован'}`);
+        
+        return { 
+          verified: isVerified, 
+          canVerify: !isVerified,
+          creator: creator
+        };
+        
+      } catch (error) {
+        console.error(`[Solana Service] ❌ Ошибка проверки статуса верификации: ${error.message}`);
+        return { verified: false, canVerify: false, error: error.message };
+      }
+      
+    } catch (error) {
+      console.error(`[Solana Service] ❌ Ошибка проверки верификации creator: ${error.message}`);
+      return { verified: false, canVerify: false, error: error.message };
+    }
+  }
+  
+  // ✅ НОВАЯ ФУНКЦИЯ: Верификация creator в коллекции
+  async verifyCreatorInCollection(collectionAddress, creatorAddress) {
+    try {
+      if (!tokenMetadata) {
+        throw new Error('Token Metadata недоступен для верификации creator');
+      }
+      
+      const collectionPubkey = publicKey(collectionAddress);
+      const creatorPubkey = publicKey(creatorAddress);
+      
+      console.log(`[Solana Service] 🔐 Начало верификации creator ${creatorAddress} в коллекции ${collectionAddress}`);
+      
+      // Получаем PDA для метаданных коллекции
+      const [metadataPda] = tokenMetadata.findMetadataPda(this.umi, {
+        mint: collectionPubkey
+      });
+      
+      // Создаем инструкцию верификации creator через UMI
+      const verifyInstruction = tokenMetadata.verifyCreatorV1(this.umi, {
+        metadata: metadataPda,
+        creator: creatorPubkey,
+      });
+      
+      // Отправляем транзакцию верификации
+      const signature = await verifyInstruction.send(this.umi, {
+        skipPreflight: false
+      });
+      
+      console.log(`[Solana Service] ✅ Транзакция верификации отправлена: ${bs58.encode(signature)}`);
+      
+      // Ждем подтверждения
+      let confirmed = false;
+      let attempts = 0;
+      const maxAttempts = 20; // 20 попыток по 2 секунды = 40 секунд
+      
+      while (!confirmed && attempts < maxAttempts) {
+        await this.sleep(2000);
+        attempts++;
+        
+        try {
+          const status = await this.umi.rpc.getSignatureStatuses([signature]);
+          const txStatus = Array.isArray(status) ? status[0] : status.value?.[0];
+          
+          if (txStatus) {
+            if (txStatus.err || txStatus.error) {
+              throw new Error(`Транзакция верификации завершилась с ошибкой: ${JSON.stringify(txStatus.err || txStatus.error)}`);
+            }
+            
+            const isConfirmed = (txStatus.commitment === 'confirmed' || txStatus.commitment === 'finalized') ||
+                              (txStatus.confirmationStatus === 'confirmed' || txStatus.confirmationStatus === 'finalized');
+            
+            if (isConfirmed) {
+              confirmed = true;
+              console.log(`[Solana Service] ✅ Creator успешно верифицирован в коллекции`);
+            }
+          }
+        } catch (pollError) {
+          console.log(`[Solana Service] Ошибка при проверке статуса верификации: ${pollError.message}`);
+        }
+      }
+      
+      if (!confirmed) {
+        throw new Error(`Транзакция верификации не была подтверждена за ${maxAttempts * 2} секунд`);
+      }
+      
+      return {
+        success: true,
+        signature: bs58.encode(signature)
+      };
+      
+    } catch (error) {
+      console.error(`[Solana Service] ❌ Ошибка верификации creator: ${error.message}`);
+      throw error;
+    }
+  }
+  
   // Минт одного NFT (адаптировано из reference логики)
   async mintSingleNFT(params) {
     const { 
@@ -181,24 +333,61 @@ class SolanaService {
       ],
     };
     
-    // 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: синхронизируем creators с JSON метаданными
+    // 🔥 УПРОЩЕННАЯ ЛОГИКА: Для личного сервиса используем кошелек плательщика как creator
+    const identityAddress = this.umi.identity.publicKey.toString();
     console.log('[Solana Service] 🔍 Проверка creators:', {
       fromMetadata: metadata.creators,
-      fallback: metadataArgs.creators,
-      identityKey: this.umi.identity.publicKey.toString()
+      identityKey: identityAddress,
+      note: 'Для личного сервиса используем кошелек плательщика как creator'
     });
     
-    // ВАЖНО: Если есть creators в metadata, используем их!
+    // ✅ УПРОЩЕНИЕ: Используем identity (кошелек плательщика) как creator по умолчанию
+    // Это избавляет от необходимости верификации, так как identity уже является update authority
+    let finalCreators = [];
+    
     if (metadata.creators && Array.isArray(metadata.creators) && metadata.creators.length > 0) {
-      console.log('[Solana Service] ✅ Используем creators из metadata');
-      metadataArgs.creators = metadata.creators.map(creator => ({
-        address: typeof creator.address === 'string' ? creator.address : this.umi.identity.publicKey,
-        share: creator.share || 100,
-        verified: true // Устанавливаем verified при минтинге
-      }));
+      // Если creators указаны в metadata, проверяем, совпадают ли они с identity
+      const creatorsFromMetadata = metadata.creators.map(creator => {
+        const addr = typeof creator.address === 'string' 
+          ? creator.address 
+          : creator.address.toString();
+        return addr;
+      });
+      
+      // Если один из creators совпадает с identity - используем его
+      const hasIdentityCreator = creatorsFromMetadata.includes(identityAddress);
+      
+      if (hasIdentityCreator) {
+        console.log('[Solana Service] ✅ Creator из metadata совпадает с identity, используем его');
+        finalCreators = metadata.creators.map(creator => ({
+          address: typeof creator.address === 'string' ? creator.address : creator.address.toString(),
+          share: creator.share || (100 / metadata.creators.length),
+          verified: true // Identity уже является authority, верификация не нужна
+        }));
+      } else {
+        // Если creator другой - используем identity как основной creator
+        console.log('[Solana Service] ⚠️ Creator из metadata отличается от identity, используем identity как creator');
+        finalCreators = [{
+          address: identityAddress,
+          share: 100,
+          verified: true
+        }];
+      }
     } else {
-      console.log('[Solana Service] ⚠️ Используем fallback creators');
+      // Если creators не указаны - используем identity
+      console.log('[Solana Service] ✅ Используем identity (кошелек плательщика) как creator');
+      finalCreators = [{
+        address: identityAddress,
+        share: 100,
+        verified: true
+      }];
     }
+    
+    metadataArgs.creators = finalCreators;
+    
+    // ✅ ПРИМЕЧАНИЕ: Верификация не требуется, так как мы используем identity как creator
+    // Identity уже является update authority коллекции, поэтому верификация не нужна
+    console.log('[Solana Service] ✅ Creators настроены, верификация не требуется (используем identity)');
     
     // Попытки минтинга с retry логикой (из reference)
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
