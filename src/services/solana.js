@@ -315,12 +315,23 @@ class SolanaService {
       throw new Error("Solana service не готов к работе");
     }
     
-    console.log(`[Solana Service] Начало минтинга NFT: ${metadata.name}`);
-    console.log(`[Solana Service] 📍 Recipient адрес: ${recipient}`);
-    console.log(`[Solana Service] 📍 Collection адрес: ${collectionAddress}`);
-    console.log(`[Solana Service] 📍 Tree адрес: ${treeAddress}`);
+    // ✅ КЛЮЧЕВАЯ ЛОГИКА: Identity = Update Authority = Creator
+    // Все коллекции созданы с одного кошелька, поэтому:
+    // - collection.verified: true (identity = update authority)
+    // - creator = identity (identity подписывает транзакцию)
+    // - creator.verified: true (identity подписывает → автоматически verified)
     
-    // Формируем аргументы метаданных (как в reference/mint_nft_stable.js)
+    const identityAddress = this.umi.identity.publicKey;
+    const identityAddressStr = identityAddress.toString();
+    
+    console.log(`[Solana Service] 🚀 Начало минтинга NFT: ${metadata.name}`);
+    console.log(`[Solana Service] 📍 Recipient: ${recipient}`);
+    console.log(`[Solana Service] 📍 Collection: ${collectionAddress}`);
+    console.log(`[Solana Service] 📍 Tree: ${treeAddress}`);
+    console.log(`[Solana Service] 🔑 Identity (платит и подписывает): ${identityAddressStr}`);
+    
+    // Формируем аргументы метаданных
+    // Creator ВСЕГДА = identity, так как identity = update authority всех коллекций
     const metadataArgs = {
       name: metadata.name || "Unnamed NFT",
       symbol: metadata.symbol || "cNFT",
@@ -328,22 +339,23 @@ class SolanaService {
       sellerFeeBasisPoints: metadata.sellerFeeBasisPoints || 0,
       collection: { 
         key: publicKey(collectionAddress), 
-        verified: false // ✅ ИСПРАВЛЕНИЕ: используем verified: false как в старом коде
+        verified: true  // ✅ true — identity является update authority коллекции
       },
-      creators: metadata.creators || [
-        { 
-          address: this.umi.identity.publicKey, 
-          share: 100, 
-          verified: true 
-        }
-      ],
+      creators: [{
+        address: identityAddress,
+        share: 100,
+        verified: true  // ✅ true — identity подписывает транзакцию
+      }],
     };
     
-    console.log('[Solana Service] 📋 Метаданные для минтинга:', {
+    console.log('[Solana Service] 📋 Конфигурация минтинга:', {
       name: metadataArgs.name,
+      symbol: metadataArgs.symbol,
       collection: collectionAddress,
-      collectionVerified: false,
-      creatorsCount: metadataArgs.creators.length
+      collectionVerified: true,
+      creator: identityAddressStr,
+      creatorVerified: true,
+      sellerFeeBasisPoints: metadataArgs.sellerFeeBasisPoints
     });
     
     // Попытки минтинга с retry логикой (из reference)
