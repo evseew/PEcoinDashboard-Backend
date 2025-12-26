@@ -18,11 +18,14 @@ try {
 
 // ✅ НОВЫЕ ИМПОРТЫ для извлечения leaf index
 let findLeafAssetIdPda;
+let findTreeConfigPda;
 try {
   findLeafAssetIdPda = require("@metaplex-foundation/mpl-bubblegum").findLeafAssetIdPda;
+  findTreeConfigPda = require("@metaplex-foundation/mpl-bubblegum").findTreeConfigPda;
   console.log('[Solana Service] ✅ findLeafAssetIdPda импортирован успешно');
+  console.log('[Solana Service] ✅ findTreeConfigPda импортирован успешно');
 } catch (error) {
-  console.error('[Solana Service] ❌ Ошибка импорта findLeafAssetIdPda:', error.message);
+  console.error('[Solana Service] ❌ Ошибка импорта Bubblegum функций:', error.message);
   console.log('[Solana Service] ⚠️ Asset ID формирование будет недоступно');
 }
 
@@ -760,98 +763,48 @@ class SolanaService {
     }
   }
 
-  // ✅ ИСПРАВЛЕННАЯ ФУНКЦИЯ: Извлечение leaf index из transaction logs
+  // ✅ ИСПРАВЛЕННАЯ ФУНКЦИЯ: Извлечение leaf index через TreeConfig (ПРАВИЛЬНЫЙ МЕТОД!)
   async extractLeafIndexFromTransaction(signature, treeAddress, recipient = null) {
     try {
-      console.log(`[Solana Service] Извлекаем leaf index из транзакции: ${signature}`);
+      console.log(`[Solana Service] 🔍 Извлекаем leaf index для транзакции: ${signature}`);
       
-      // ✅ МЕТОД 1: Запрос к tree account ДО попыток парсинга транзакции
-      // Это самый надежный способ - получаем текущее количество листьев после минтинга
-      console.log(`[Solana Service] 🔍 Метод 1: Запрашиваем tree state для получения leaf count`);
+      // ✅ МЕТОД 1 (ОСНОВНОЙ): Чтение num_minted из TreeConfig
+      // TreeConfig хранит точное количество заминченных NFT
+      console.log(`[Solana Service] 🔍 Метод 1: Читаем TreeConfig.num_minted`);
       try {
-        // Ждем немного, чтобы tree account обновился
-        await this.sleep(2000);
+        // Небольшая задержка чтобы TreeConfig обновился
+        await this.sleep(1000);
         
-        const totalLeafCount = await this.getNextLeafIndexFromTree(treeAddress);
+        const numMinted = await this.getNumMintedFromTreeConfig(treeAddress);
         
-        if (totalLeafCount !== null && totalLeafCount > 0) {
-          // Leaf index = total_leaf_count - 1 (так как индексация с 0)
-          const leafIndex = totalLeafCount - 1;
-          
-          // ✅ ВАЛИДАЦИЯ: Проверяем, что leaf index разумный
-          if (leafIndex >= 0 && leafIndex < 10000000) {
-            console.log(`[Solana Service] ✅ Leaf index вычислен из tree state: ${leafIndex} (total leaves: ${totalLeafCount})`);
-            return leafIndex;
-          } else {
-            console.warn(`[Solana Service] ⚠️ Неверный leaf index: ${leafIndex} (слишком большой, total: ${totalLeafCount})`);
-          }
+        if (numMinted !== null && numMinted > 0) {
+          // Leaf index = num_minted - 1 (индексация с 0)
+          const leafIndex = numMinted - 1;
+          console.log(`[Solana Service] ✅ Leaf index = ${leafIndex} (TreeConfig.num_minted = ${numMinted})`);
+          return leafIndex;
         }
-      } catch (treeError) {
-        console.warn(`[Solana Service] ⚠️ Метод 1 не сработал: ${treeError.message}`);
+      } catch (treeConfigError) {
+        console.warn(`[Solana Service] ⚠️ Метод 1 (TreeConfig) не сработал: ${treeConfigError.message}`);
       }
 
-      // ✅ МЕТОД 2: Парсинг логов транзакции
-      console.log(`[Solana Service] 🔍 Метод 2: Парсим логи транзакции`);
+      // ✅ МЕТОД 2: Повторная попытка с большей задержкой
+      console.log(`[Solana Service] 🔍 Метод 2: Повторный запрос к TreeConfig`);
       try {
-        const transactionDetails = await this.umi.rpc.getTransaction(signature, {
-          commitment: 'finalized',
-          maxSupportedTransactionVersion: 0
-        });
-
-        if (transactionDetails && transactionDetails.meta && transactionDetails.meta.logMessages) {
-          // Ищем в логах программы Bubblegum
-          const bubblegumProgramId = bubblegum.MPL_BUBBLEGUM_PROGRAM_ID.toString();
-          
-          for (const log of transactionDetails.meta.logMessages) {
-            // Ищем различные форматы логов с leaf index
-            const patterns = [
-              /leaf.*index[:\s]+(\d+)/i,
-              /Leaf\s+(\d+)/i,
-              /leaf_index[:\s]+(\d+)/i,
-              /leafIndex[:\s]+(\d+)/i,
-              /index[:\s]+(\d+).*leaf/i
-            ];
-            
-            for (const pattern of patterns) {
-              const match = log.match(pattern);
-              if (match) {
-                const leafIndex = parseInt(match[1]);
-                if (leafIndex >= 0) {
-                  console.log(`[Solana Service] ✅ Leaf index найден в логах: ${leafIndex}`);
-                  return leafIndex;
-                }
-              }
-            }
-          }
+        await this.sleep(3000);
+        
+        const numMinted = await this.getNumMintedFromTreeConfig(treeAddress);
+        
+        if (numMinted !== null && numMinted > 0) {
+          const leafIndex = numMinted - 1;
+          console.log(`[Solana Service] ✅ Leaf index = ${leafIndex} (повторная попытка)`);
+          return leafIndex;
         }
-      } catch (logError) {
-        console.warn(`[Solana Service] ⚠️ Метод 2 не сработал: ${logError.message}`);
+      } catch (treeConfigError2) {
+        console.warn(`[Solana Service] ⚠️ Метод 2 не сработал: ${treeConfigError2.message}`);
       }
 
-      // ✅ МЕТОД 3: Альтернативный запрос к tree account (повторная попытка)
-      console.log(`[Solana Service] 🔍 Метод 3: Повторный запрос к tree state`);
-      try {
-        await this.sleep(3000); // Ждем еще немного
-        
-        const totalLeafCount = await this.getNextLeafIndexFromTree(treeAddress);
-        
-        if (totalLeafCount !== null && totalLeafCount > 0) {
-          const leafIndex = totalLeafCount - 1;
-          
-          // ✅ ВАЛИДАЦИЯ: Проверяем, что leaf index разумный
-          if (leafIndex >= 0 && leafIndex < 10000000) {
-            console.log(`[Solana Service] ✅ Leaf index вычислен из tree state (повтор): ${leafIndex}`);
-            return leafIndex;
-          } else {
-            console.warn(`[Solana Service] ⚠️ Неверный leaf index (повтор): ${leafIndex} (слишком большой)`);
-          }
-        }
-      } catch (treeError2) {
-        console.warn(`[Solana Service] ⚠️ Метод 3 не сработал: ${treeError2.message}`);
-      }
-
-      // ✅ МЕТОД 4: Поиск через DAS API по owner и signature (если доступен)
-      console.log(`[Solana Service] 🔍 Метод 4: Поиск через DAS API по owner`);
+      // ✅ МЕТОД 3: Fallback через DAS API (если TreeConfig недоступен)
+      console.log(`[Solana Service] 🔍 Метод 3: Fallback через DAS API`);
       try {
         const leafIndexFromDAS = await this.findLeafIndexFromDAS(signature, treeAddress, recipient);
         if (leafIndexFromDAS !== null) {
@@ -859,42 +812,57 @@ class SolanaService {
           return leafIndexFromDAS;
         }
       } catch (dasError) {
-        console.warn(`[Solana Service] ⚠️ Метод 4 не сработал: ${dasError.message}`);
+        console.warn(`[Solana Service] ⚠️ Метод 3 (DAS) не сработал: ${dasError.message}`);
       }
 
-      // Если все методы не сработали, возвращаем null (не бросаем ошибку)
-      console.warn(`[Solana Service] ⚠️ Не удалось извлечь leaf index ни одним способом`);
-      console.warn(`[Solana Service] 💡 NFT был успешно заминтен, но leaf index недоступен. NFT может появиться в кошельке через 15-30 минут.`);
+      // Если все методы не сработали
+      console.warn(`[Solana Service] ⚠️ Не удалось извлечь leaf index`);
+      console.warn(`[Solana Service] 💡 NFT успешно заминтен, но asset ID недоступен. NFT появится в кошельке через 15-30 минут.`);
       return null;
       
     } catch (error) {
       console.error('[Solana Service] Ошибка извлечения leaf index:', error.message);
-      console.error('[Solana Service] Stack:', error.stack);
-      // Не бросаем ошибку, возвращаем null - минтинг был успешным
       return null;
     }
   }
 
-  // ✅ УДАЛЕНА: parseLeafIndexFromInstructionData больше не используется
-  // Используем более надежный метод через tree account state
-
-  // ✅ ИСПРАВЛЕННАЯ ФУНКЦИЯ: Получение следующего leaf index из tree account
-  async getNextLeafIndexFromTree(treeAddress) {
+  // ✅ НОВЫЙ МЕТОД: Получение num_minted из TreeConfig account (ПРАВИЛЬНЫЙ СПОСОБ!)
+  // TreeConfig хранит точное количество заминченных NFT
+  async getNumMintedFromTreeConfig(treeAddress) {
     try {
-      // Получаем account data для merkle tree
-      const treeAccount = await this.umi.rpc.getAccount(publicKey(treeAddress));
+      console.log(`[Solana Service] 📊 Читаем TreeConfig для дерева: ${treeAddress}`);
       
-      if (!treeAccount.exists) {
-        throw new Error('Tree account не найден');
+      // Вычисляем TreeConfig PDA
+      let treeConfigPDA;
+      
+      if (findTreeConfigPda) {
+        // Используем официальную функцию из mpl-bubblegum
+        [treeConfigPDA] = findTreeConfigPda(this.umi, {
+          merkleTree: publicKey(treeAddress)
+        });
+        console.log(`[Solana Service] 📍 TreeConfig PDA (via SDK): ${treeConfigPDA}`);
+      } else {
+        // Fallback: вычисляем PDA вручную
+        // Seeds: ["tree_config", merkleTree]
+        const seeds = [
+          Buffer.from("tree_config"),
+          publicKey(treeAddress).bytes
+        ];
+        
+        [treeConfigPDA] = this.umi.eddsa.findPda(bubblegum.MPL_BUBBLEGUM_PROGRAM_ID, seeds);
+        console.log(`[Solana Service] 📍 TreeConfig PDA (manual): ${treeConfigPDA}`);
       }
-
-      // Парсим данные tree account для получения total_leaf_count
-      // Структура account data для spl-account-compression:
-      // [discriminator(8)] + [tree_id(32)] + [authority(32)] + [creator_hash(32)] + [delegate(32)] + [nonce(8)] + [num_mint_batches(8)] + [num_valid_leaf_batches(8)] + [total_leaf_count(8)]
-      // total_leaf_count находится по offset 8+32+32+32+32+8+8+8 = 160 байт
-      let data = treeAccount.data;
       
-      // Конвертируем в Buffer если нужно
+      // Получаем TreeConfig account
+      const treeConfigAccount = await this.umi.rpc.getAccount(treeConfigPDA);
+      
+      if (!treeConfigAccount.exists) {
+        console.warn(`[Solana Service] ⚠️ TreeConfig account не найден для: ${treeAddress}`);
+        return null;
+      }
+      
+      // Конвертируем в Buffer
+      let data = treeConfigAccount.data;
       if (!Buffer.isBuffer(data)) {
         if (data instanceof Uint8Array) {
           data = Buffer.from(data);
@@ -903,40 +871,34 @@ class SolanaService {
         } else if (Array.isArray(data)) {
           data = Buffer.from(data);
         } else {
-          console.warn('[Solana Service] Неизвестный тип account data:', typeof data);
+          console.warn('[Solana Service] Неизвестный тип TreeConfig data:', typeof data);
           return null;
         }
       }
       
-      console.log(`[Solana Service] 📊 Tree account data length: ${data.length} bytes`);
+      console.log(`[Solana Service] 📊 TreeConfig account data length: ${data.length} bytes`);
       
-      // Проверяем минимальную длину (нужно хотя бы 168 байт для total_leaf_count)
-      if (data.length >= 168) {
-        // total_leaf_count находится по offset 160 (после всех предыдущих полей)
-        const totalLeafCount = Number(data.readBigUInt64LE(160));
-        
-        // ✅ ВАЛИДАЦИЯ: Проверяем, что значение разумное
-        if (totalLeafCount >= 0 && totalLeafCount < 10000000) {
-          console.log(`[Solana Service] 📊 Tree account: total_leaf_count = ${totalLeafCount} (offset 160)`);
-          return totalLeafCount;
-        } else {
-          console.warn(`[Solana Service] ⚠️ Неверное значение total_leaf_count по offset 160: ${totalLeafCount} (слишком большое)`);
-        }
-      }
+      // Структура TreeConfig account (Bubblegum):
+      // [discriminator(8)] + [tree_creator(32)] + [tree_delegate(32)] + [total_mint_capacity(8)] + [num_minted(8)] + [is_public(1)] + [is_decompressible(1)]
+      // num_minted находится по offset: 8 + 32 + 32 + 8 = 80 байт
       
-      // Альтернативный метод: пробуем разные offset'ы с валидацией
-      console.log(`[Solana Service] 🔍 Пробуем альтернативные offset'ы для поиска total_leaf_count`);
-      const offsets = [160, 152, 144, 136, 128, 120, 112, 104, 96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8, 0];
+      // Но нужно учитывать дискриминатор account - проверим разные варианты
+      const possibleOffsets = [
+        { offset: 80, name: 'standard (8+32+32+8)' },
+        { offset: 72, name: 'no_discriminator (32+32+8)' },
+        { offset: 88, name: 'with_padding (8+32+32+8+8)' },
+        { offset: 64, name: 'minimal (32+32)' }
+      ];
       
-      for (const offset of offsets) {
+      for (const { offset, name } of possibleOffsets) {
         if (data.length >= offset + 8) {
           try {
-            const value = Number(data.readBigUInt64LE(offset));
-            // ✅ СТРОГАЯ ВАЛИДАЦИЯ: Валидный leaf count должен быть разумным числом
-            // Обычно в дереве Меркля не более нескольких миллионов листьев
-            if (value >= 0 && value < 10000000 && value === Math.floor(value)) {
-              console.log(`[Solana Service] ✅ Найден валидный leaf count по offset ${offset}: ${value}`);
-              return value;
+            const numMinted = Number(data.readBigUInt64LE(offset));
+            
+            // Валидация: num_minted должно быть разумным числом
+            if (numMinted >= 0 && numMinted < 10000000) {
+              console.log(`[Solana Service] ✅ TreeConfig.num_minted = ${numMinted} (offset ${offset}: ${name})`);
+              return numMinted;
             }
           } catch (readError) {
             continue;
@@ -944,14 +906,20 @@ class SolanaService {
         }
       }
       
-      console.warn(`[Solana Service] ⚠️ Не удалось найти валидный total_leaf_count в tree account`);
+      console.warn(`[Solana Service] ⚠️ Не удалось прочитать num_minted из TreeConfig`);
       return null;
       
     } catch (error) {
-      console.warn('[Solana Service] Ошибка получения leaf index из tree:', error.message);
-      console.warn('[Solana Service] Stack:', error.stack);
+      console.error('[Solana Service] Ошибка чтения TreeConfig:', error.message);
+      console.error('[Solana Service] Stack:', error.stack);
       return null;
     }
+  }
+  
+  // ✅ LEGACY: Оставляем для обратной совместимости, но теперь это обёртка над новым методом
+  async getNextLeafIndexFromTree(treeAddress) {
+    // Используем новый метод через TreeConfig
+    return await this.getNumMintedFromTreeConfig(treeAddress);
   }
 
   // ✅ НОВАЯ ФУНКЦИЯ: Формирование asset ID из tree address и leaf index
