@@ -316,8 +316,11 @@ class SolanaService {
     }
     
     console.log(`[Solana Service] Начало минтинга NFT: ${metadata.name}`);
+    console.log(`[Solana Service] 📍 Recipient адрес: ${recipient}`);
+    console.log(`[Solana Service] 📍 Collection адрес: ${collectionAddress}`);
+    console.log(`[Solana Service] 📍 Tree адрес: ${treeAddress}`);
     
-    // Формируем аргументы метаданных (из reference)
+    // Формируем аргументы метаданных (как в reference/mint_nft_stable.js)
     const metadataArgs = {
       name: metadata.name || "Unnamed NFT",
       symbol: metadata.symbol || "cNFT",
@@ -325,7 +328,7 @@ class SolanaService {
       sellerFeeBasisPoints: metadata.sellerFeeBasisPoints || 0,
       collection: { 
         key: publicKey(collectionAddress), 
-        verified: true // 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: cNFT ДОЛЖНЫ БЫТЬ verified для Phantom!
+        verified: false // ✅ ИСПРАВЛЕНИЕ: используем verified: false как в старом коде
       },
       creators: metadata.creators || [
         { 
@@ -336,61 +339,12 @@ class SolanaService {
       ],
     };
     
-    // 🔥 УПРОЩЕННАЯ ЛОГИКА: Для личного сервиса используем кошелек плательщика как creator
-    const identityAddress = this.umi.identity.publicKey.toString();
-    console.log('[Solana Service] 🔍 Проверка creators:', {
-      fromMetadata: metadata.creators,
-      identityKey: identityAddress,
-      note: 'Для личного сервиса используем кошелек плательщика как creator'
+    console.log('[Solana Service] 📋 Метаданные для минтинга:', {
+      name: metadataArgs.name,
+      collection: collectionAddress,
+      collectionVerified: false,
+      creatorsCount: metadataArgs.creators.length
     });
-    
-    // ✅ УПРОЩЕНИЕ: Используем identity (кошелек плательщика) как creator по умолчанию
-    // Это избавляет от необходимости верификации, так как identity уже является update authority
-    let finalCreators = [];
-    
-    if (metadata.creators && Array.isArray(metadata.creators) && metadata.creators.length > 0) {
-      // Если creators указаны в metadata, проверяем, совпадают ли они с identity
-      const creatorsFromMetadata = metadata.creators.map(creator => {
-        const addr = typeof creator.address === 'string' 
-          ? creator.address 
-          : creator.address.toString();
-        return addr;
-      });
-      
-      // Если один из creators совпадает с identity - используем его
-      const hasIdentityCreator = creatorsFromMetadata.includes(identityAddress);
-      
-      if (hasIdentityCreator) {
-        console.log('[Solana Service] ✅ Creator из metadata совпадает с identity, используем его');
-        finalCreators = metadata.creators.map(creator => ({
-          address: typeof creator.address === 'string' ? creator.address : creator.address.toString(),
-          share: creator.share || (100 / metadata.creators.length),
-          verified: true // Identity уже является authority, верификация не нужна
-        }));
-      } else {
-        // Если creator другой - используем identity как основной creator
-        console.log('[Solana Service] ⚠️ Creator из metadata отличается от identity, используем identity как creator');
-        finalCreators = [{
-          address: identityAddress,
-          share: 100,
-          verified: true
-        }];
-      }
-    } else {
-      // Если creators не указаны - используем identity
-      console.log('[Solana Service] ✅ Используем identity (кошелек плательщика) как creator');
-      finalCreators = [{
-        address: identityAddress,
-        share: 100,
-        verified: true
-      }];
-    }
-    
-    metadataArgs.creators = finalCreators;
-    
-    // ✅ ПРИМЕЧАНИЕ: Верификация не требуется, так как мы используем identity как creator
-    // Identity уже является update authority коллекции, поэтому верификация не нужна
-    console.log('[Solana Service] ✅ Creators настроены, верификация не требуется (используем identity)');
     
     // Попытки минтинга с retry логикой (из reference)
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -475,10 +429,10 @@ class SolanaService {
             console.log(`[Solana Service] 🔍 Формируем asset ID для leaf index ${leafIndex}...`);
             assetId = await this.deriveAssetId(treeAddress, leafIndex);
             
-            // ✅ НОВОЕ: Запускаем DAS диагностику
+            // ✅ НОВОЕ: Запускаем DAS диагностику с recipient для проверки владельца
             if (assetId) {
               console.log(`[Solana Service] 🔬 Запускаем DAS диагностику для asset ID: ${assetId}`);
-              dasStatus = await this.performCompressedNFTDiagnostics(assetId, treeAddress, leafIndex);
+              dasStatus = await this.performCompressedNFTDiagnostics(assetId, treeAddress, leafIndex, recipient);
             }
           } else {
             console.warn(`[Solana Service] ⚠️ Не удалось извлечь leaf index после двух попыток`);
@@ -494,7 +448,8 @@ class SolanaService {
         const result = {
           success: true,
           signature: bs58.encode(signature),
-          elapsedTime
+          elapsedTime,
+          recipient: recipient // Добавляем recipient для отладки
         };
 
         // Добавляем leaf index и asset ID только если они были успешно получены
@@ -1049,6 +1004,82 @@ class SolanaService {
     }
   }
 
+  // ✅ НОВАЯ ФУНКЦИЯ: Проверка видимости NFT для владельца через getAssetsByOwner (как делает Phantom)
+  async checkOwnerVisibility(assetId, ownerAddress) {
+    try {
+      console.log(`[Solana Service] 🔍 Проверяем видимость NFT ${assetId} для владельца ${ownerAddress}`);
+      
+      const dasApiUrl = process.env.DAS_API_URL || process.env.RPC_URL || "https://api.mainnet-beta.solana.com";
+      
+      // Запрашиваем все NFT владельца через getAssetsByOwner (как делает Phantom)
+      const response = await fetch(dasApiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'check-owner-visibility',
+          method: 'getAssetsByOwner',
+          params: {
+            ownerAddress: ownerAddress,
+            page: 1,
+            limit: 1000
+          }
+        }),
+        signal: AbortSignal.timeout(15000)
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        
+        if (result.result && result.result.items) {
+          // Ищем наш NFT в списке NFT владельца
+          const foundAsset = result.result.items.find(asset => asset.id === assetId);
+          
+          if (foundAsset) {
+            console.log(`[Solana Service] ✅ NFT найден в списке NFT владельца через getAssetsByOwner`);
+            return {
+              visible: true,
+              asset: foundAsset,
+              ownership: foundAsset.ownership,
+              compression: foundAsset.compression,
+              totalAssets: result.result.items.length
+            };
+          } else {
+            console.warn(`[Solana Service] ⚠️ NFT НЕ найден в списке NFT владельца (всего NFT у владельца: ${result.result.items.length})`);
+            return {
+              visible: false,
+              totalAssets: result.result.items.length,
+              reason: 'NFT не найден в списке getAssetsByOwner - возможно еще индексируется'
+            };
+          }
+        } else {
+          console.warn(`[Solana Service] ⚠️ DAS API вернул пустой список NFT для владельца`);
+          return {
+            visible: false,
+            reason: 'DAS API вернул пустой список',
+            error: 'Empty result from DAS API'
+          };
+        }
+      } else {
+        console.warn(`[Solana Service] ⚠️ Ошибка запроса к DAS API: ${response.status} ${response.statusText}`);
+        return {
+          visible: false,
+          reason: `HTTP error: ${response.status}`,
+          error: response.statusText
+        };
+      }
+      
+    } catch (error) {
+      console.error(`[Solana Service] ❌ Ошибка проверки видимости владельца: ${error.message}`);
+      return {
+        visible: false,
+        error: error.message
+      };
+    }
+  }
+
   // ✅ НОВАЯ ФУНКЦИЯ: Получение asset proof через DAS API
   async getAssetProofFromDAS(assetId) {
     try {
@@ -1096,7 +1127,7 @@ class SolanaService {
   }
 
   // ✅ НОВАЯ ФУНКЦИЯ: Полная диагностика compressed NFT
-  async performCompressedNFTDiagnostics(assetId, treeAddress, leafIndex) {
+  async performCompressedNFTDiagnostics(assetId, treeAddress, leafIndex, recipient = null) {
     try {
       console.log(`[Solana Service] 🔬 Выполняем полную диагностику compressed NFT`);
       
@@ -1104,6 +1135,7 @@ class SolanaService {
         assetId,
         treeAddress,
         leafIndex,
+        recipient: recipient || null,
         checks: {}
       };
 
@@ -1117,7 +1149,7 @@ class SolanaService {
         diagnostics.checks.treeError = error.message;
       }
 
-      // 2. Проверка DAS индексации
+      // 2. Проверка DAS индексации через getAsset
       const dasResult = await this.checkDASIndexing(assetId, 3, 3000); // Быстрая проверка
       diagnostics.checks.dasIndexed = dasResult.indexed;
       diagnostics.checks.dasDetails = dasResult;
@@ -1127,10 +1159,38 @@ class SolanaService {
       diagnostics.checks.assetProofAvailable = proofResult.success;
       diagnostics.checks.proofDetails = proofResult;
 
-      // 4. Общий статус
+      // 4. ✅ КРИТИЧЕСКАЯ ПРОВЕРКА: Проверка владельца через getAssetsByOwner (как делает Phantom)
+      let ownerCheckResult = null;
+      if (recipient) {
+        try {
+          console.log(`[Solana Service] 🔍 Проверяем видимость NFT для владельца через getAssetsByOwner: ${recipient}`);
+          ownerCheckResult = await this.checkOwnerVisibility(assetId, recipient);
+          diagnostics.checks.ownerVisible = ownerCheckResult.visible;
+          diagnostics.checks.ownerCheckDetails = ownerCheckResult;
+          
+          if (ownerCheckResult.visible) {
+            console.log(`[Solana Service] ✅ NFT виден для владельца через getAssetsByOwner`);
+          } else {
+            console.warn(`[Solana Service] ⚠️ NFT НЕ виден для владельца через getAssetsByOwner - это причина проблемы с Phantom!`);
+          }
+        } catch (ownerError) {
+          console.warn(`[Solana Service] ⚠️ Ошибка проверки владельца: ${ownerError.message}`);
+          diagnostics.checks.ownerVisible = false;
+          diagnostics.checks.ownerCheckError = ownerError.message;
+        }
+      } else {
+        console.warn(`[Solana Service] ⚠️ Recipient не указан, пропускаем проверку владельца`);
+        diagnostics.checks.ownerVisible = null;
+      }
+
+      // 5. Общий статус с учетом проверки владельца
+      const phantomReady = diagnostics.checks.dasIndexed && 
+                           diagnostics.checks.assetProofAvailable && 
+                           (diagnostics.checks.ownerVisible === true || diagnostics.checks.ownerVisible === null);
+      
       diagnostics.summary = {
         mintSuccessful: true,
-        phantomReady: diagnostics.checks.dasIndexed && diagnostics.checks.assetProofAvailable,
+        phantomReady: phantomReady,
         estimatedIndexingTime: diagnostics.checks.dasIndexed ? 'Completed' : '15-30 minutes',
         recommendations: []
       };
@@ -1144,9 +1204,17 @@ class SolanaService {
         diagnostics.summary.recommendations.push('Asset proof недоступен - возможны проблемы с DAS API');
       }
 
+      // ✅ КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ: Если NFT не виден для владельца
+      if (diagnostics.checks.ownerVisible === false) {
+        diagnostics.summary.recommendations.push('⚠️ КРИТИЧНО: NFT не виден для владельца через getAssetsByOwner - Phantom не сможет его найти!');
+        diagnostics.summary.recommendations.push('Возможные причины: задержка индексации DAS API (15-30 минут) или проблема с owner в leaf');
+        diagnostics.summary.phantomReady = false;
+      }
+
       console.log(`[Solana Service] 📊 Диагностика завершена:`, {
         phantomReady: diagnostics.summary.phantomReady,
-        dasIndexed: diagnostics.checks.dasIndexed
+        dasIndexed: diagnostics.checks.dasIndexed,
+        ownerVisible: diagnostics.checks.ownerVisible
       });
 
       return diagnostics;
@@ -1155,11 +1223,15 @@ class SolanaService {
       console.error('[Solana Service] Ошибка диагностики:', error.message);
       return {
         assetId,
+        treeAddress,
+        leafIndex,
+        recipient: recipient || null,
         error: error.message,
         summary: {
           mintSuccessful: true,
           phantomReady: false,
-          estimatedIndexingTime: 'Unknown - диагностика недоступна'
+          estimatedIndexingTime: 'Unknown - диагностика недоступна',
+          recommendations: ['Ошибка диагностики - проверьте NFT вручную через DAS API']
         }
       };
     }
